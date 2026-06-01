@@ -74,15 +74,27 @@ def process_all_speakers():
 
 
 def process_all_speakers():
-    process_count = 30 if os.cpu_count() > 60 else (os.cpu_count() - 2 if os.cpu_count() > 4 else 1)
-    with ProcessPoolExecutor(max_workers=process_count) as executor:
-        for speaker in speakers:
-            spk_dir = os.path.join(args.in_dir, speaker)
-            if os.path.isdir(spk_dir):
-                print(spk_dir)
-                futures = [executor.submit(process, (spk_dir, i, args)) for i in os.listdir(spk_dir) if i.endswith("wav")]
-                for _ in track(concurrent.futures.as_completed(futures), total=len(futures), description="resampling:"):
-                    pass
+    # 进程数过高在高核心数 Windows 上会因 spawn+import 风暴卡死；默认上限 8，可由参数覆盖。
+    if args.num_processes and args.num_processes > 0:
+        process_count = args.num_processes
+    else:
+        process_count = min(8, max(1, (os.cpu_count() or 2) - 2))
+
+    for speaker in speakers:
+        spk_dir = os.path.join(args.in_dir, speaker)
+        if not os.path.isdir(spk_dir):
+            continue
+        print(spk_dir)
+        wavs = [i for i in os.listdir(spk_dir) if i.endswith("wav")]
+        if process_count <= 1:
+            for i in track(wavs, description="resampling:"):
+                process((spk_dir, i, args))
+            continue
+        with ProcessPoolExecutor(max_workers=process_count) as executor:
+            futures = [executor.submit(process, (spk_dir, i, args)) for i in wavs]
+            for _ in track(concurrent.futures.as_completed(futures), total=len(futures), description="resampling:"):
+                pass
+
 
 
 if __name__ == "__main__":
@@ -91,6 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--in_dir", type=str, default="./dataset_raw", help="path to source dir")
     parser.add_argument("--out_dir2", type=str, default="./dataset/44k", help="path to target dir")
     parser.add_argument("--skip_loudnorm", action="store_true", help="Skip loudness matching if you have done it")
+    parser.add_argument("--num_processes", type=int, default=0, help="并行进程数，0=自动(上限8)，1=单进程")
     args = parser.parse_args()
 
     print(f"CPU count: {cpu_count()}")

@@ -1,4 +1,5 @@
 import logging
+import os
 
 import soundfile
 
@@ -21,6 +22,8 @@ def main():
     parser.add_argument('-c', '--config_path', type=str, default="logs/44k/config.json", help='配置文件路径')
     parser.add_argument('-cl', '--clip', type=float, default=0, help='音频强制切片，默认0为自动切片，单位为秒/s')
     parser.add_argument('-n', '--clean_names', type=str, nargs='+', default=["君の知らない物語-src.wav"], help='wav文件名列表，放在raw文件夹下')
+    parser.add_argument('-ip', '--input_paths', type=str, nargs='+', default=[], help='任意输入音频完整路径列表（GUI 用，优先于 -n/raw 目录）')
+    parser.add_argument('-op', '--output_dir', type=str, default="", help='输出目录（GUI 用，优先于 results 目录）')
     parser.add_argument('-t', '--trans', type=int, nargs='+', default=[0], help='音高调整，支持正负（半音）')
     parser.add_argument('-s', '--spk_list', type=str, nargs='+', default=['buyizi'], help='合成目标说话人名称')
     
@@ -104,17 +107,25 @@ def main():
                     args.feature_retrieval)
     
     infer_tool.mkdir(["raw", "results"])
-    
+    if args.output_dir:
+        import os as _os
+        _os.makedirs(args.output_dir, exist_ok=True)
+
     if len(spk_mix_map)<=1:
         use_spk_mix = False
     if use_spk_mix:
         spk_list = [spk_mix_map]
-    
-    infer_tool.fill_a_to_b(trans, clean_names)
-    for clean_name, tran in zip(clean_names, trans):
-        raw_audio_path = f"raw/{clean_name}"
-        if "." not in raw_audio_path:
-            raw_audio_path += ".wav"
+
+    # GUI 模式：传入任意路径列表；否则回退到 raw/ 目录 + clean_names
+    if args.input_paths:
+        infer_tool.fill_a_to_b(trans, args.input_paths)
+        infer_sources = list(zip(args.input_paths, trans))
+    else:
+        infer_tool.fill_a_to_b(trans, clean_names)
+        infer_sources = [(f"raw/{n}" if "." in n else f"raw/{n}.wav", t) for n, t in zip(clean_names, trans)]
+
+    for raw_audio_path, tran in infer_sources:
+        clean_name = os.path.basename(raw_audio_path)
         infer_tool.format_wav(raw_audio_path)
         for spk in spk_list:
             kwarg = {
@@ -147,9 +158,12 @@ def main():
                 isdiffusion = "diff"
             if use_spk_mix:
                 spk = "spk_mix"
-            res_path = f'results/{clean_name}_{key}_{spk}{cluster_name}_{isdiffusion}_{f0p}.{wav_format}'
+            res_name = f'{clean_name}_{key}_{spk}{cluster_name}_{isdiffusion}_{f0p}.{wav_format}'
+            out_dir = args.output_dir if args.output_dir else "results"
+            res_path = os.path.join(out_dir, res_name)
             soundfile.write(res_path, audio, svc_model.target_sample, format=wav_format)
             svc_model.clear_empty()
+
             
 if __name__ == '__main__':
     main()

@@ -1,0 +1,23 @@
+{
+  "volume": 100,
+  "project": "kina",
+  "device": "GPU",
+  "chart_auto": true,
+  "chart_log": false,
+  "infer": {
+    "inf_ckpt": "",
+    "inf_spk": "kina",
+    "inf_diff_model": ""
+  },
+  "dataset": {
+    "ds_scandir": "dataset_raw",
+    "rs_skip_loudnorm": true,
+    "rs_sr": 44100,
+    "rs_numproc": 16,
+    "ds_encoder": "vec768l12",
+    "ds_volaug": true,
+    "ds_f0method": "rmvpe",
+    "ds_numproc": 0,
+    "ds_usediff": true
+  }
+}

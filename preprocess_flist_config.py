@@ -30,6 +30,8 @@ if __name__ == "__main__":
     parser.add_argument("--train_list", type=str, default="./filelists/train.txt", help="path to train list")
     parser.add_argument("--val_list", type=str, default="./filelists/val.txt", help="path to val list")
     parser.add_argument("--source_dir", type=str, default="./dataset/44k", help="path to source dir")
+    parser.add_argument("--config_out", type=str, default="configs/config.json", help="path to output config.json")
+    parser.add_argument("--diff_config_out", type=str, default="configs/diffusion.yaml", help="path to output diffusion.yaml")
     parser.add_argument("--speech_encoder", type=str, default="vec768l12", help="choice a speech encoder|'vec768l12','vec256l9','hubertsoft','whisper-ppg','cnhubertlarge','dphubert','whisper-ppg-large','wavlmbase+'")
     parser.add_argument("--vol_aug", action="store_true", help="Whether to use volume embedding and volume augmentation")
     parser.add_argument("--tiny", action="store_true", help="Whether to train sovits tiny")
@@ -112,8 +114,10 @@ if __name__ == "__main__":
     if args.tiny:
         config_template["model"]["filter_channels"] = 512
 
-    logger.info("Writing to configs/config.json")
-    with open("configs/config.json", "w") as f:
+    os.makedirs(os.path.dirname(args.config_out) or ".", exist_ok=True)
+    logger.info(f"Writing to {args.config_out}")
+    with open(args.config_out, "w") as f:
         json.dump(config_template, f, indent=2)
-    logger.info("Writing to configs/diffusion.yaml")
-    du.save_config("configs/diffusion.yaml",d_config_template)
+    os.makedirs(os.path.dirname(args.diff_config_out) or ".", exist_ok=True)
+    logger.info(f"Writing to {args.diff_config_out}")
+    du.save_config(args.diff_config_out, d_config_template)

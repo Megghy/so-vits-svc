@@ -19,6 +19,7 @@ from models import (
     MultiPeriodDiscriminator,
     SynthesizerTrn,
 )
+from modules.optimizers import build_optimizer
 from modules.losses import discriminator_loss, feature_loss, generator_loss, kl_loss
 from modules.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 
@@ -76,16 +77,8 @@ def run(rank, n_gpus, hps):
         hps.train.segment_size // hps.data.hop_length,
         **hps.model).cuda(rank)
     net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
-    optim_g = torch.optim.AdamW(
-        net_g.parameters(),
-        hps.train.learning_rate,
-        betas=hps.train.betas,
-        eps=hps.train.eps)
-    optim_d = torch.optim.AdamW(
-        net_d.parameters(),
-        hps.train.learning_rate,
-        betas=hps.train.betas,
-        eps=hps.train.eps)
+    optim_g = build_optimizer(net_g.parameters(), hps.train)
+    optim_d = build_optimizer(net_d.parameters(), hps.train)
     net_g = DDP(net_g, device_ids=[rank])  # , find_unused_parameters=True)
     net_d = DDP(net_d, device_ids=[rank])
 

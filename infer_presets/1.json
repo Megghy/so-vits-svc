@@ -1,0 +1,18 @@
+{
+  "inf_trans": 0,
+  "inf_slicedb": -40,
+  "inf_f0method": "rmvpe",
+  "inf_autof0": false,
+  "inf_cluster_ratio": 0.0,
+  "inf_noise": 0.4000000059604645,
+  "inf_pad": 0.5,
+  "inf_clip": 0.0,
+  "inf_device": "GPU",
+  "inf_spk": "kina",
+  "inf_shallow": true,
+  "inf_kstep": 80,
+  "inf_second_enc": false,
+  "inf_enhance": false,
+  "inf_feature_retrieval": false,
+  "inf_lea": 1.0
+}

@@ -21,14 +21,15 @@ from modules.mel_processing import spectrogram_torch
 logging.getLogger("numba").setLevel(logging.WARNING)
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
-hps = utils.get_hparams_from_file("configs/config.json")
-dconfig = du.load_config("configs/diffusion.yaml")
-sampling_rate = hps.data.sampling_rate
-hop_length = hps.data.hop_length
-speech_encoder = hps["model"]["speech_encoder"]
+# 配置在 __main__ 中按命令行参数赋值，支持多工程（不再硬编码 configs/config.json）
+hps = None
+dconfig = None
+sampling_rate = None
+hop_length = None
+speech_encoder = None
 
 
-def process_one(filename, hmodel, f0p, device, diff=False, mel_extractor=None):
+def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extractor=None):
     wav, sr = librosa.load(filename, sr=sampling_rate)
     audio_norm = torch.FloatTensor(wav)
     audio_norm = audio_norm.unsqueeze(0)
@@ -41,7 +42,6 @@ def process_one(filename, hmodel, f0p, device, diff=False, mel_extractor=None):
 
     f0_path = filename + ".f0.npy"
     if not os.path.exists(f0_path):
-        f0_predictor = utils.get_f0_predictor(f0p,sampling_rate=sampling_rate, hop_length=hop_length,device=None,threshold=0.05)
         f0,uv = f0_predictor.compute_f0_uv(
             wav
         )
@@ -103,7 +103,13 @@ def process_one(filename, hmodel, f0p, device, diff=False, mel_extractor=None):
             np.save(aug_vol_path,aug_vol.to('cpu').numpy())
 
 
-def process_batch(file_chunk, f0p, diff=False, mel_extractor=None, device="cpu"):
+def process_batch(file_chunk, f0p, diff=False, mel_extractor=None, device="cpu", hps_param=None):
+    # spawn 子进程不执行 __main__，需在此把配置写回模块全局，供 process_one 使用
+    global hps, sampling_rate, hop_length, speech_encoder
+    hps = hps_param
+    sampling_rate = hps.data.sampling_rate
+    hop_length = hps.data.hop_length
+    speech_encoder = hps["model"]["speech_encoder"]
     logger.info("Loading speech encoder for content...")
     rank = mp.current_process()._identity
     rank = rank[0] if len(rank) > 0 else 0
@@ -113,17 +119,19 @@ def process_batch(file_chunk, f0p, diff=False, mel_extractor=None, device="cpu")
     logger.info(f"Rank {rank} uses device {device}")
     hmodel = utils.get_speech_encoder(speech_encoder, device=device)
     logger.info(f"Loaded speech encoder for rank {rank}")
+    f0_predictor = utils.get_f0_predictor(f0p, sampling_rate=sampling_rate, hop_length=hop_length, device=device, threshold=0.05)
+    logger.info(f"Loaded f0 predictor {f0p} for rank {rank}")
     for filename in tqdm(file_chunk, position = rank):
-        process_one(filename, hmodel, f0p, device, diff, mel_extractor)
+        process_one(filename, hmodel, f0_predictor, device, diff, mel_extractor)
 
-def parallel_process(filenames, num_processes, f0p, diff, mel_extractor, device):
+def parallel_process(filenames, num_processes, f0p, diff, mel_extractor, device, hps_param):
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
         tasks = []
         for i in range(num_processes):
             start = int(i * len(filenames) / num_processes)
             end = int((i + 1) * len(filenames) / num_processes)
             file_chunk = filenames[start:end]
-            tasks.append(executor.submit(process_batch, file_chunk, f0p, diff, mel_extractor, device=device))
+            tasks.append(executor.submit(process_batch, file_chunk, f0p, diff, mel_extractor, device=device, hps_param=hps_param))
         for task in tqdm(tasks, position = 0):
             task.result()
 
@@ -132,6 +140,12 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--device', type=str, default=None)
     parser.add_argument(
         "--in_dir", type=str, default="dataset/44k", help="path to input dir"
+    )
+    parser.add_argument(
+        "--config", type=str, default="configs/config.json", help="path to config.json"
+    )
+    parser.add_argument(
+        "--diff-config", type=str, default="configs/diffusion.yaml", help="path to diffusion.yaml"
     )
     parser.add_argument(
         '--use_diff',action='store_true', help='Whether to use the diffusion model'
@@ -143,6 +157,13 @@ if __name__ == "__main__":
         '--num_processes', type=int, default=1, help='You are advised to set the number of processes to the same as the number of CPU cores'
     )
     args = parser.parse_args()
+
+    hps = utils.get_hparams_from_file(args.config)
+    dconfig = du.load_config(args.diff_config)
+    sampling_rate = hps.data.sampling_rate
+    hop_length = hps.data.hop_length
+    speech_encoder = hps["model"]["speech_encoder"]
+
     f0p = args.f0_predictor
     device = args.device
     if device is None:
@@ -169,4 +190,4 @@ if __name__ == "__main__":
     if num_processes == 0:
         num_processes = os.cpu_count()
 
-    parallel_process(filenames, num_processes, f0p, args.use_diff, mel_extractor, device)
+    parallel_process(filenames, num_processes, f0p, args.use_diff, mel_extractor, device, hps)

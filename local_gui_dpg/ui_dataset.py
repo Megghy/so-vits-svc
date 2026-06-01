@@ -19,6 +19,7 @@ DATASET_SETTING_KEYS = (
     "rs_numproc",
     "ds_encoder",
     "ds_volaug",
+    "ds_reuse_config",
     "ds_f0method",
     "ds_numproc",
     "ds_usediff",
@@ -117,12 +118,25 @@ def create_dataset_tab(state):
                               default_value=_saved_value(settings, "ds_encoder", "vec768l12"),
                               width=150, callback=_save_item("ds_encoder"))
                 with dpg.tooltip(dpg.last_item()):
-                    dpg.add_text("唱歌推荐 vec768l12\n说话可用 hubertsoft/cnhubertlarge")
+                    dpg.add_text("内容特征提取器，须与训练页保持一致。\n"
+                                 "· vec768l12：默认，唱歌综合最优(ssl_dim=768)\n"
+                                 "· wavlmlarge：WavLM-Large 第6层，解耦更强、咬字更准\n"
+                                 "  (ssl_dim 自动设为 1024，需放置 pretrain/WavLM-Large.pt)\n"
+                                 "· cnhubertlarge/whisper-ppg：偏说话场景\n"
+                                 "切换编码器后必须重新提取特征并重训。")
                 dpg.add_checkbox(label="音量增强(vol_aug)", tag="ds_volaug",
                                  default_value=_saved_value(settings, "ds_volaug", False),
                                  callback=_save_item("ds_volaug"))
                 with dpg.tooltip(dpg.last_item()):
                     dpg.add_text("训练时随机调整音量，增强鲁棒性")
+                dpg.add_checkbox(label="复用已有配置", tag="ds_reuse_config",
+                                 default_value=_saved_value(settings, "ds_reuse_config", True),
+                                 callback=_save_item("ds_reuse_config"))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("工程内已存在 config.json/diffusion.yaml 时，以其为基底，\n"
+                                 "仅更新说话人列表与编码器相关字段，保留已在训练页调好的\n"
+                                 "batch_size/学习率/判别器/增强等超参，无需重新设置。\n"
+                                 "首次生成或文件不存在时此项无影响。")
                 dpg.add_button(label="生成配置", callback=lambda: _run_preconfig(state))
 
         dpg.add_spacer(height=10)
@@ -167,7 +181,7 @@ def create_dataset_tab(state):
             dpg.add_button(label="复制全部", callback=lambda: _copy_log(state, "ds"))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "ds", "ds_log", "ds_pipe_msg"))
         with dpg.child_window(tag="ds_log_win", height=300, border=True, horizontal_scrollbar=True):
-            dpg.add_text("", tag="ds_log")
+            dpg.add_input_text(tag="ds_log", multiline=True, readonly=True, width=-1, height=18)
 
     # 文件夹选择对话框
     with dpg.file_dialog(directory_selector=True, show=False, tag="ds_folder_dialog",
@@ -214,11 +228,12 @@ def _run_preconfig(state):
     proj = state["current_project"]
     encoder = dpg.get_value("ds_encoder")
     vol_aug = dpg.get_value("ds_volaug")
+    reuse_config = dpg.get_value("ds_reuse_config")
     train_list = os.path.join(config.filelist_dir(proj), "train.txt")
     val_list = os.path.join(config.filelist_dir(proj), "val.txt")
     cfg_out = config.config_path(proj)
     diff_out = config.diff_config_path(proj)
-    cmd = backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out)
+    cmd = backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out, reuse_config)
     state["patch_after_ds"] = True
     state["jobs"]["ds"].start(cmd)
 
@@ -255,6 +270,7 @@ def _run_all(state):
     in_dir = scan_dir if os.path.isabs(scan_dir) else os.path.join(backend.ROOT, scan_dir)
     encoder = dpg.get_value("ds_encoder")
     vol_aug = dpg.get_value("ds_volaug")
+    reuse_config = dpg.get_value("ds_reuse_config")
     f0_method = dpg.get_value("ds_f0method")
     num_proc = dpg.get_value("ds_numproc")
     use_diff = dpg.get_value("ds_usediff")
@@ -266,7 +282,7 @@ def _run_all(state):
 
     steps = [
         ("重采样", backend.resample_cmd(sr, in_dir, backend.DATASET_44K, skip_loudnorm, rs_num_proc)),
-        ("生成配置", backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out)),
+        ("生成配置", backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out, reuse_config)),
         ("提取特征+f0", backend.hubert_cmd(f0_method, num_proc, use_diff, backend.DATASET_44K, cfg_out, diff_out)),
     ]
     state["jobs"]["ds"].start_chain(steps)

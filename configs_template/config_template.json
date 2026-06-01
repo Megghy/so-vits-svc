@@ -24,7 +24,11 @@
     "port": "8001",
     "keep_ckpts": 3,
     "all_in_mem": false,
-    "vol_aug":false
+    "vol_aug":false,
+    "feature_aug": false,
+    "feature_aug_noise": 0.0,
+    "feature_aug_time_mask": 0,
+    "feature_aug_channel_dropout": 0.0
   },
   "data": {
     "training_files": "filelists/train.txt",
@@ -67,7 +71,10 @@
     "use_depthwise_conv":false,
     "flow_share_parameter": false,
     "use_automatic_f0_prediction": true,
-    "use_transformer_flow": false
+    "use_transformer_flow": false,
+    "use_cqt_disc": false,
+    "use_mrd_disc": false,
+    "use_mbd_disc": false
   },
   "spk": {
     "nyaru": 0,

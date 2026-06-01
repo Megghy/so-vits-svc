@@ -78,8 +78,13 @@ def create_train_tab(state):
             with dpg.group(horizontal=True):
                 dpg.add_button(label="重新加载", callback=lambda: _reload_config(state))
                 dpg.add_button(label="保存到 config.json", callback=lambda: _save_config(state))
+                dpg.add_button(label="检查配置", callback=lambda: _check_config(state))
                 dpg.add_text("4080S 建议 fp16_run=false + half_type=bf16，开 all_in_mem 加速。", color=(128, 203, 196))
                 dpg.add_text("", tag="cfg_msg", color=(255, 255, 100))
+            dpg.add_spacer(height=4)
+            with dpg.child_window(tag="cfg_check_win", height=130, border=True):
+                dpg.add_text("修改参数会自动体检，或点「检查配置」手动运行。",
+                             tag="cfg_check_result", wrap=900, color=(150, 150, 150))
 
         dpg.add_spacer(height=10)
 
@@ -91,7 +96,7 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "train", "train_log", "train_msg"))
                 with dpg.child_window(tag="train_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text("", tag="train_log")
+                    dpg.add_input_text(tag="train_log", multiline=True, readonly=True, width=-1, height=18)
 
             with dpg.tab(label="扩散日志"):
                 with dpg.group(horizontal=True):
@@ -99,7 +104,7 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "diff", "diff_log", "diff_msg"))
                 with dpg.child_window(tag="diff_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text("", tag="diff_log")
+                    dpg.add_input_text(tag="diff_log", multiline=True, readonly=True, width=-1, height=18)
 
             with dpg.tab(label="聚类/检索日志"):
                 with dpg.group(horizontal=True):
@@ -107,14 +112,14 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "cluster", "cluster_log", "cluster_msg"))
                 with dpg.child_window(tag="cluster_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text("", tag="cluster_log")
+                    dpg.add_input_text(tag="cluster_log", multiline=True, readonly=True, width=-1, height=18)
 
             with dpg.tab(label="训练曲线"):
                 with dpg.group(horizontal=True):
                     dpg.add_text("曲线:")
                     dpg.add_combo([], tag="chart_tag", width=300, callback=lambda: _plot_chart(state))
                     dpg.add_checkbox(label="对数纵轴", tag="chart_log", callback=lambda: _plot_chart(state))
-                    dpg.add_checkbox(label="自动刷新(5s)", tag="chart_auto", default_value=True)
+                    dpg.add_checkbox(label="自动刷新(5s)", tag="chart_auto", default_value=False)
                     dpg.add_button(label="刷新曲线", callback=lambda: _refresh_chart(state))
                 dpg.add_spacer(height=5)
                 dpg.add_text("提示：完整的 TensorBoard 功能请前往 TensorBoard 标签页。", color=(128, 203, 196))
@@ -126,46 +131,56 @@ def create_train_tab(state):
                 dpg.add_text("", tag="chart_msg", color=(255, 255, 100))
 
 
+def _add_config_field(path):
+    """渲染单个配置字段(标签+控件+tooltip)。"""
+    field = config.CONFIG_FIELD_MAP.get(path)
+    if field is None:
+        dpg.add_text("")
+        dpg.add_text("")
+        return
+    _, name, ftype, default, range_opts, tooltip = field
+    tag = f"cfg_{path}"
+    dpg.add_text(name + ":")
+    if ftype == "bool":
+        dpg.add_checkbox(tag=tag, default_value=default, callback=_auto_save_config)
+    elif ftype == "combo":
+        dpg.add_combo(range_opts, tag=tag, default_value=default, width=150, callback=_auto_save_config)
+    elif ftype == "int":
+        if range_opts:
+            dpg.add_drag_int(tag=tag, default_value=default, min_value=range_opts[0],
+                             max_value=range_opts[1], width=150, callback=_auto_save_config)
+        else:
+            dpg.add_input_int(tag=tag, default_value=default, width=150, step=0, callback=_auto_save_config)
+    elif ftype == "float":
+        if range_opts:
+            dpg.add_drag_float(tag=tag, default_value=default, min_value=range_opts[0],
+                               max_value=range_opts[1], width=150, format="%.6f", callback=_auto_save_config)
+        else:
+            dpg.add_input_float(tag=tag, default_value=default, width=150, format="%.6f", step=0, callback=_auto_save_config)
+    if tooltip:
+        with dpg.tooltip(dpg.last_item()):
+            dpg.add_text(tooltip)
+
+
 def _create_config_fields():
-    """创建配置字段网格"""
-    with dpg.table(header_row=False, borders_innerH=True, borders_outerH=True,
-                   borders_innerV=True, borders_outerV=True):
-        dpg.add_table_column()
-        dpg.add_table_column()
-        dpg.add_table_column()
-        dpg.add_table_column()
-
-        for i in range(0, len(config.CONFIG_FIELDS), 2):
-            with dpg.table_row():
-                for j in range(2):
-                    idx = i + j
-                    if idx >= len(config.CONFIG_FIELDS):
-                        dpg.add_text("")
-                        dpg.add_text("")
-                        continue
-                    path, name, ftype, default, range_opts, tooltip = config.CONFIG_FIELDS[idx]
-                    tag = f"cfg_{path}"
-
-                    dpg.add_text(name + ":")
-                    if ftype == "bool":
-                        dpg.add_checkbox(tag=tag, default_value=default, callback=_auto_save_config)
-                    elif ftype == "combo":
-                        dpg.add_combo(range_opts, tag=tag, default_value=default, width=150, callback=_auto_save_config)
-                    elif ftype == "int":
-                        if range_opts:
-                            dpg.add_drag_int(tag=tag, default_value=default, min_value=range_opts[0],
-                                             max_value=range_opts[1], width=150, callback=_auto_save_config)
-                        else:
-                            dpg.add_input_int(tag=tag, default_value=default, width=150, step=0, callback=_auto_save_config)
-                    elif ftype == "float":
-                        if range_opts:
-                            dpg.add_drag_float(tag=tag, default_value=default, min_value=range_opts[0],
-                                               max_value=range_opts[1], width=150, format="%.6f", callback=_auto_save_config)
-                        else:
-                            dpg.add_input_float(tag=tag, default_value=default, width=150, format="%.6f", step=0, callback=_auto_save_config)
-                    if tooltip:
-                        with dpg.tooltip(dpg.last_item()):
-                            dpg.add_text(tooltip)
+    """按分组渲染配置字段，每组一个折叠面板，组内 2 列网格。"""
+    for group_name, paths, default_open in config.CONFIG_GROUPS:
+        with dpg.collapsing_header(label=group_name, default_open=default_open):
+            with dpg.table(header_row=False, borders_innerH=True, borders_outerH=True,
+                           borders_innerV=True, borders_outerV=True):
+                dpg.add_table_column()
+                dpg.add_table_column()
+                dpg.add_table_column()
+                dpg.add_table_column()
+                for i in range(0, len(paths), 2):
+                    with dpg.table_row():
+                        for j in range(2):
+                            idx = i + j
+                            if idx >= len(paths):
+                                dpg.add_text("")
+                                dpg.add_text("")
+                                continue
+                            _add_config_field(paths[idx])
 
 
 def _start_train(state):
@@ -254,6 +269,7 @@ def _reload_config(state):
         except KeyError:
             pass
     dpg.set_value("cfg_msg", "已从配置文件重新加载。")
+    _check_config(state, silent=True)
 
 
 def _save_config(state):
@@ -271,8 +287,32 @@ def _save_config(state):
     try:
         changed = config.save_config(proj, values)
         dpg.set_value("cfg_msg", f"已保存 {len(changed)} 项改动。" if changed else "无改动。")
+        _check_config(state, silent=True)
     except Exception as e:
         dpg.set_value("cfg_msg", f"保存失败：{e}")
+
+
+def _check_config(state, silent=False):
+    """配置静态体检，结果写入 cfg_check_result 并按严重度着色。silent=True 时不抢占 cfg_msg。"""
+    if not state or not state.get("current_project"):
+        if not silent:
+            dpg.set_value("cfg_msg", "请先选择工程。")
+        return
+    proj = state["current_project"]
+    if not os.path.exists(config.config_path(proj)):
+        if not silent:
+            dpg.set_value("cfg_msg", "配置不存在，先跑预处理。")
+        return
+    issues = config.check_config(config.load_config(proj))
+    icon = {"error": "[错误] ", "warn": "[警告] ", "info": "[提示] ", "ok": "[OK] "}
+    dpg.set_value("cfg_check_result", "\n".join(icon.get(lv, "") + msg for lv, msg in issues))
+    n_err = sum(1 for lv, _ in issues if lv == "error")
+    n_warn = sum(1 for lv, _ in issues if lv == "warn")
+    color = (255, 120, 120) if n_err else (255, 215, 120) if n_warn else (150, 220, 150)
+    dpg.configure_item("cfg_check_result", color=color)
+    if not silent:
+        summ = "未发现问题。" if not (n_err or n_warn) else f"{n_err} 个错误、{n_warn} 个警告。"
+        dpg.set_value("cfg_msg", "已检查：" + summ)
 
 
 def _refresh_chart(state):
@@ -347,6 +387,7 @@ def _auto_save_config():
         changed = config.save_config(proj, values)
         if changed:
             dpg.set_value("cfg_msg", f"已自动保存 {len(changed)} 项")
+        _check_config(_global_state, silent=True)
     except Exception as e:
         dpg.set_value("cfg_msg", f"自动保存失败: {e}")
 

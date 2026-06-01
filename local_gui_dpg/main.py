@@ -42,7 +42,8 @@ def create_main_window():
         "out_before": set(),
         "loaded": None,
         "chart_scalars": {},
-        "last_chart": 0.0,
+        "chart_dirty": False,
+        "chart_auto_on": False,
         "target_step": 0,
         "patch_after_ds": False,
         "pending_log_scroll": set(),
@@ -141,6 +142,15 @@ def _refresh_project_ui(state):
     _refresh_chart(state)
 
 
+def _log_line_height(state):
+    lh = state.get("_log_line_h")
+    if not lh:
+        sz = dpg.get_text_size("Ag")
+        lh = sz[1] if sz else 14
+        state["_log_line_h"] = lh
+    return lh
+
+
 def _update_logs(state):
     """定时刷新所有日志窗口"""
     pending = state.setdefault("pending_log_scroll", set())
@@ -157,6 +167,8 @@ def _update_logs(state):
             text = job.buf.snapshot()
             if dpg.does_item_exist(log_tag):
                 dpg.set_value(log_tag, text)
+                lines = text.count("\n") + 1
+                dpg.configure_item(log_tag, height=int(lines * _log_line_height(state)) + 8)
                 pending.add(win_tag)
 
 
@@ -231,19 +243,27 @@ def _check_jobs(state):
         _refresh_ckpts(state)
 
 
-def _auto_refresh_chart(state):
-    """训练中自动刷新曲线 + 目标step自动停"""
-    if not state["jobs"]["train"].running():
-        return
-    if time.time() - state["last_chart"] < 5:
-        return
-    state["last_chart"] = time.time()
+def _chart_worker(state):
+    """后台线程：训练中定时全量解析 tfevents（重 IO），结果写入 state。
+    放后台是为了不阻塞主渲染线程——这步是训练时 UI 卡顿的根因。
+    仅在「自动刷新开启」或「设了目标step」时才解析，避免无谓 IO。"""
+    while dpg.is_dearpygui_running():
+        try:
+            if (state["jobs"]["train"].running() and state.get("current_project")
+                    and (state.get("chart_auto_on") or state.get("target_step"))):
+                state["chart_scalars"] = config.read_scalars(config.log_dir(state["current_project"]))
+                state["chart_dirty"] = True
+        except Exception:
+            pass
+        time.sleep(5)
 
-    if not state["current_project"]:
+
+def _auto_refresh_chart(state):
+    """主线程消费后台读好的曲线数据：绘图 + 目标step自动停。本身不做重 IO。"""
+    if not state.get("chart_dirty"):
         return
-    proj = state["current_project"]
-    scalars = config.read_scalars(config.log_dir(proj))
-    state["chart_scalars"] = scalars
+    state["chart_dirty"] = False
+    scalars = state.get("chart_scalars", {})
 
     if dpg.get_value("chart_auto"):
         tags = list(scalars.keys())
@@ -255,7 +275,7 @@ def _auto_refresh_chart(state):
         if cur:
             _plot_chart(state)
 
-    # 目标step自动停
+    # 目标step自动停（不受自动刷新开关影响）
     target = state.get("target_step", 0)
     if target:
         cur_step = max((s[-1] for s, _ in scalars.values() if s), default=0)
@@ -268,6 +288,7 @@ def _auto_refresh_chart(state):
 def main_loop(state):
     """主循环：定时刷新日志、播放器、任务状态、训练曲线"""
     while dpg.is_dearpygui_running():
+        state["chart_auto_on"] = dpg.get_value("chart_auto")
         _update_logs(state)
         _update_player(state)
         _check_jobs(state)
@@ -312,6 +333,8 @@ def main():
 
     import threading
     threading.Thread(target=_async_scan, daemon=True).start()
+    # 训练曲线解析放后台线程，避免阻塞主渲染线程
+    threading.Thread(target=_chart_worker, args=(state,), daemon=True).start()
 
     # 启动主循环
     try:

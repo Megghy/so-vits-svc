@@ -169,4 +169,3 @@ trained/**/
 infer_out/
 projects/
 .*/
-gui_settings.json

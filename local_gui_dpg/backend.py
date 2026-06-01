@@ -235,7 +235,7 @@ def resample_cmd(sr, in_dir, out_dir, skip_loudnorm=False, num_proc=0):
     return cmd
 
 
-def config_cmd(encoder, vol_aug, source_dir, train_list, val_list, config_out, diff_config_out):
+def config_cmd(encoder, vol_aug, source_dir, train_list, val_list, config_out, diff_config_out, reuse_config=False):
     cmd = _py("preprocess_flist_config.py") + [
         "--source_dir", _rel(source_dir),
         "--speech_encoder", encoder,
@@ -245,6 +245,8 @@ def config_cmd(encoder, vol_aug, source_dir, train_list, val_list, config_out, d
         "--diff_config_out", _rel(diff_config_out)]
     if vol_aug:
         cmd += ["--vol_aug"]
+    if reuse_config:
+        cmd += ["--reuse_config"]
     return cmd
 
 

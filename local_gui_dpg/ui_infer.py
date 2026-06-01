@@ -322,7 +322,7 @@ def create_infer_tab(state):
             dpg.add_button(label="复制全部", callback=lambda: _copy_infer_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "infer", "inf_log", "out_path"))
         with dpg.child_window(tag="inf_log_win", height=230, border=True, horizontal_scrollbar=True):
-            dpg.add_text("", tag="inf_log")
+            dpg.add_input_text(tag="inf_log", multiline=True, readonly=True, width=-1, height=18)
 
     # 聚类模型文件对话框（保留 DPG 的，因为不常用）
     with dpg.file_dialog(show=False, tag="inf_cluster_dialog",

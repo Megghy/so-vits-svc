@@ -24,6 +24,7 @@
 |--------|----------|------|
 | **vec768l12** (ContentVec) | ⭐ 最佳 | **保持默认**。社区唱歌模型主流选择，发音动态保留好 |
 | **wavlmbase+** (WavLM) | 可对照 | 🟡 唯一值得 A/B 的对象，音色解耦更强，咬字可能更清，但提升不保证 |
+| **etawavlmlarge** (Eta-WavLM) | 🟡 解耦实验 | ✅ 已接入。在 wavlmlarge 上叠加 Eta-WavLM(ACL2025) 线性去说话人，ssl_dim=1024，专治音色泄漏，详见下方 |
 | whisper-ppg / -large | ❌ 不推荐 | ASR 模型抽 PPG 特征，刻意丢音高；高音/长音/颤音处咬字易糊。large-v2 还特别重。**留给纯语音转换** |
 | hubertsoft / cnhubertlarge | 一般 | 无明显唱歌优势 |
 
@@ -51,6 +52,22 @@
 
 **4. 优化器对照：+ Schedule-Free AdamW**
 - 已有 AdamW/Lion，可再加 Meta 的 schedule-free 做三方对照，免调度器。
+
+**5. 内容编码器 A/B：vec768l12 vs wavlmbase+**
+- 见上方编码器表。唱歌坚持 vec768l12 为主，wavlmbase+ 做对照。
+
+**5b. Eta-WavLM 去说话人 A/B：wavlmlarge vs etawavlmlarge** ✅ 已接入
+- Eta-WavLM(ACL 2025, arXiv:2505.19273)：在 WavLM-Large 特征上做**线性去说话人**分解，
+  剥离音色相关分量，输出维度/帧率不变(1024 维 @ 50fps @ 16k)，专治翻唱「音色泄漏」。
+- 原理：每条音频用 x-vector(transformers `WavLMForXVector`，无需新依赖)算说话人向量 s，
+  预测的说话人分量 `[1,s]·W` 是整条音频的常量偏移，从每帧内容特征减去。`W` 在多说话人语料上拟合一次。
+- 实现位置：`vencoder/EtaWavLMLarge.py`、`vencoder/eta_speaker.py`、拟合脚本 `eta_wavlm_fit.py`。
+- 用法：
+  1) `python eta_wavlm_fit.py --in_dir <多说话人wav目录>` → 生成 `pretrain/eta_wavlm_proj.pt`
+     (⚠️ 必须多说话人语料，单说话人唱歌集拟合无意义，只会去均值)
+  2) 配置 `speech_encoder: "etawavlmlarge"`(ssl_dim 自动 1024)，重新预处理 + 重训。
+- 接入成本：低。与 wavlmlarge 同基座、同维度，是天然 A/B 对象(只比「去说话人 vs 不去」)。
+- 风险：去说话人是常量偏移移除，理论温和；若多说话人语料质量差/说话人太少，投影会退化为近似去均值，收益有限。
 
 **5. 内容编码器 A/B：vec768l12 vs wavlmbase+**
 - 见上方编码器表。唱歌坚持 vec768l12 为主，wavlmbase+ 做对照。

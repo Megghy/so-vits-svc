@@ -17,6 +17,15 @@ from scipy.io.wavfile import read
 from sklearn.cluster import MiniBatchKMeans
 from torch.nn import functional as F
 
+# torch>=2.6 changed torch.load default to weights_only=True, which rejects the
+# custom classes pickled in trusted local checkpoints (fairseq Dictionary, omegaconf
+# configs, project G_*.pth optimizer state). Restore the legacy default once here.
+_orig_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
 MATPLOTLIB_FLAG = False
 
 logging.basicConfig(stream=sys.stdout, level=logging.WARN)
@@ -148,6 +157,12 @@ def get_speech_encoder(speech_encoder,device=None,**kargs):
     elif speech_encoder == "wavlmbase+":
         from vencoder.WavLMBasePlus import WavLMBasePlus
         speech_encoder_object = WavLMBasePlus(device = device)
+    elif speech_encoder == "wavlmlarge":
+        from vencoder.WavLMLarge import WavLMLarge
+        speech_encoder_object = WavLMLarge(device = device)
+    elif speech_encoder == "etawavlmlarge":
+        from vencoder.EtaWavLMLarge import EtaWavLMLarge
+        speech_encoder_object = EtaWavLMLarge(device = device)
     else:
         raise Exception("Unknown speech encoder")
     return speech_encoder_object 

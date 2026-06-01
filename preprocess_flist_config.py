@@ -32,12 +32,17 @@ if __name__ == "__main__":
     parser.add_argument("--source_dir", type=str, default="./dataset/44k", help="path to source dir")
     parser.add_argument("--config_out", type=str, default="configs/config.json", help="path to output config.json")
     parser.add_argument("--diff_config_out", type=str, default="configs/diffusion.yaml", help="path to output diffusion.yaml")
-    parser.add_argument("--speech_encoder", type=str, default="vec768l12", help="choice a speech encoder|'vec768l12','vec256l9','hubertsoft','whisper-ppg','cnhubertlarge','dphubert','whisper-ppg-large','wavlmbase+'")
+    parser.add_argument("--speech_encoder", type=str, default="vec768l12", help="choice a speech encoder|'vec768l12','vec256l9','hubertsoft','whisper-ppg','cnhubertlarge','dphubert','whisper-ppg-large','wavlmbase+','wavlmlarge','etawavlmlarge'")
     parser.add_argument("--vol_aug", action="store_true", help="Whether to use volume embedding and volume augmentation")
     parser.add_argument("--tiny", action="store_true", help="Whether to train sovits tiny")
+    parser.add_argument("--reuse_config", action="store_true", help="若输出文件已存在，则以其为基底，仅更新说话人/编码器相关字段，保留已调好的训练超参")
     args = parser.parse_args()
-    
-    config_template =  json.load(open("configs_template/config_tiny_template.json")) if args.tiny else json.load(open("configs_template/config_template.json"))
+
+    if args.reuse_config and os.path.exists(args.config_out):
+        logger.info(f"复用已存在的配置作为基底: {args.config_out}")
+        config_template = json.load(open(args.config_out))
+    else:
+        config_template = json.load(open("configs_template/config_tiny_template.json")) if args.tiny else json.load(open("configs_template/config_template.json"))
     train = []
     val = []
     idx = 0
@@ -86,7 +91,11 @@ if __name__ == "__main__":
             f.write(wavpath + "\n")
 
 
-    d_config_template = du.load_config("configs_template/diffusion_template.yaml")
+    if args.reuse_config and os.path.exists(args.diff_config_out):
+        logger.info(f"复用已存在的扩散配置作为基底: {args.diff_config_out}")
+        d_config_template = du.load_config(args.diff_config_out)
+    else:
+        d_config_template = du.load_config("configs_template/diffusion_template.yaml")
     d_config_template["model"]["n_spk"] = spk_id
     d_config_template["data"]["encoder"] = args.speech_encoder
     d_config_template["spk"] = spk_dict
@@ -101,7 +110,7 @@ if __name__ == "__main__":
     elif args.speech_encoder == "vec256l9" or args.speech_encoder == 'hubertsoft':
         config_template["model"]["ssl_dim"] = config_template["model"]["gin_channels"] = 256
         d_config_template["data"]["encoder_out_channels"] = 256
-    elif args.speech_encoder == "whisper-ppg" or args.speech_encoder == 'cnhubertlarge':
+    elif args.speech_encoder == "whisper-ppg" or args.speech_encoder == 'cnhubertlarge' or args.speech_encoder == 'wavlmlarge' or args.speech_encoder == 'etawavlmlarge':
         config_template["model"]["ssl_dim"] = config_template["model"]["filter_channels"] = config_template["model"]["gin_channels"] = 1024
         d_config_template["data"]["encoder_out_channels"] = 1024
     elif args.speech_encoder == "whisper-ppg-large":

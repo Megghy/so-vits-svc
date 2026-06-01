@@ -1,4 +1,5 @@
 import logging
+import math
 import multiprocessing
 import os
 import time
@@ -6,7 +7,7 @@ import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -31,6 +32,50 @@ global_step = 0
 start_time = time.time()
 
 # os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'INFO'
+
+
+def cosine_warmup_lr(step, base_lr, warmup_steps, total_steps, eta_min_ratio):
+    """按 step 的 warmup + 余弦退火：前 warmup_steps 线性升到 base_lr，
+    之后余弦衰减到 base_lr*eta_min_ratio，到 total_steps 触底后保持。"""
+    if warmup_steps > 0 and step < warmup_steps:
+        return base_lr * (step + 1) / warmup_steps
+    progress = min((step - warmup_steps) / max(1, total_steps - warmup_steps), 1.0)
+    return base_lr * (eta_min_ratio + (1 - eta_min_ratio) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def ensure_base_models(model_dir, speech_encoder):
+    """训练前确保主模型底模就位：model_dir 内无 G_*/D_* 时，按编码器从 pretrain/ 复制，
+    本地缺失且 meta.base_model_dict 配置了直链则下载；都没有则跳过(从零训练)。"""
+    import glob
+    import shutil
+    import urllib.request
+    from pretrain.meta import base_model_dict
+
+    if glob.glob(os.path.join(model_dir, "G_*.pth")) or glob.glob(os.path.join(model_dir, "D_*.pth")):
+        return  # 已有 checkpoint，续训，不动底模
+
+    os.makedirs(model_dir, exist_ok=True)
+    urls = base_model_dict().get(speech_encoder, {})
+    for fname in ("G_0.pth", "D_0.pth"):
+        dst = os.path.join(model_dir, fname)
+        # 本地查找顺序：编码器专属子目录 -> pretrain 根目录
+        local = next((p for p in (os.path.join("pretrain", speech_encoder, fname),
+                                   os.path.join("pretrain", fname)) if os.path.exists(p)), None)
+        if local:
+            shutil.copy2(local, dst)
+            print(f"[底模] 已复制 {local} -> {dst}")
+            continue
+        url = urls.get(fname)
+        if not url:
+            print(f"[底模] 未找到 {fname}：pretrain/ 下无对应文件且未配置下载直链，将从零训练。")
+            continue
+        try:
+            print(f"[底模] 下载 {url} -> {dst}")
+            urllib.request.urlretrieve(url, dst)
+        except Exception as e:
+            if os.path.exists(dst):
+                os.remove(dst)
+            print(f"[底模] 下载 {fname} 失败({e})，将从零训练。")
 
 
 def main():
@@ -76,13 +121,36 @@ def run(rank, n_gpus, hps):
         hps.data.filter_length // 2 + 1,
         hps.train.segment_size // hps.data.hop_length,
         **hps.model).cuda(rank)
-    net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
+    if getattr(hps.model, "use_cqt_disc", False) or getattr(hps.model, "use_mrd_disc", False) or getattr(hps.model, "use_mbd_disc", False):
+        from modules.discriminators_cqt import (
+            CombinedDiscriminator,
+            MultiBandDiscriminator,
+            MultiResolutionDiscriminator,
+            MultiScaleSubbandCQTDiscriminator,
+        )
+        discs = [MultiPeriodDiscriminator(hps.model.use_spectral_norm)]
+        if getattr(hps.model, "use_cqt_disc", False):
+            discs.append(MultiScaleSubbandCQTDiscriminator({"sampling_rate": hps.data.sampling_rate}))
+        if getattr(hps.model, "use_mrd_disc", False):
+            discs.append(MultiResolutionDiscriminator({}))
+        if getattr(hps.model, "use_mbd_disc", False):
+            discs.append(MultiBandDiscriminator({}))
+        net_d = CombinedDiscriminator(discs).cuda(rank)
+    else:
+        net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
     optim_g = build_optimizer(net_g.parameters(), hps.train)
     optim_d = build_optimizer(net_d.parameters(), hps.train)
-    net_g = DDP(net_g, device_ids=[rank])  # , find_unused_parameters=True)
-    net_d = DDP(net_d, device_ids=[rank])
+    # Windows 上 torch>=2.4 的 DDP+gloo backward 会触发 access violation 崩溃，
+    # 单卡训练本就不需要 DDP，直接跳过包装。多卡仍走 DDP。
+    if n_gpus > 1:
+        net_g = DDP(net_g, device_ids=[rank])
+        net_d = DDP(net_d, device_ids=[rank])
 
     skip_optimizer = False
+    if rank == 0:
+        ensure_base_models(hps.model_dir, hps.model.speech_encoder)
+    if n_gpus > 1:
+        dist.barrier()
     try:
         _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"), net_g,
                                                    optim_g, skip_optimizer)
@@ -100,40 +168,30 @@ def run(rank, n_gpus, hps):
         epoch_str = 1
         global_step = 0
 
-    warmup_epoch = hps.train.warmup_epochs
-    scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
-    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
-
-    scaler = GradScaler(enabled=hps.train.fp16_run)
+    scaler = GradScaler('cuda', enabled=hps.train.fp16_run and hps.train.half_type != "bf16")
 
     for epoch in range(epoch_str, hps.train.epochs + 1):
-        # set up warm-up learning rate
-        if epoch <= warmup_epoch:
-            for param_group in optim_g.param_groups:
-                param_group['lr'] = hps.train.learning_rate / warmup_epoch * epoch
-            for param_group in optim_d.param_groups:
-                param_group['lr'] = hps.train.learning_rate / warmup_epoch * epoch
-        # training
         if rank == 0:
-            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], [scheduler_g, scheduler_d], scaler,
+            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], scaler,
                                [train_loader, eval_loader], logger, [writer, writer_eval])
         else:
-            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], [scheduler_g, scheduler_d], scaler,
+            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], scaler,
                                [train_loader, None], None, None)
-        # update learning rate
-        scheduler_g.step()
-        scheduler_d.step()
 
 
-def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loaders, logger, writers):
+def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, writers):
     net_g, net_d = nets
     optim_g, optim_d = optims
-    scheduler_g, scheduler_d = schedulers
     train_loader, eval_loader = loaders
     if writers is not None:
         writer, writer_eval = writers
-    
+
     half_type = torch.bfloat16 if hps.train.half_type=="bf16" else torch.float16
+
+    base_lr = hps.train.learning_rate
+    warmup_steps = hps.train.warmup_epochs * len(train_loader)
+    total_steps = getattr(hps.train, "cosine_total_steps", 40000)
+    eta_min_ratio = getattr(hps.train, "cosine_eta_min_ratio", 0.02)
 
     # train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -141,6 +199,11 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
     net_g.train()
     net_d.train()
     for batch_idx, items in enumerate(train_loader):
+        cur_lr = cosine_warmup_lr(global_step, base_lr, warmup_steps, total_steps, eta_min_ratio)
+        for pg in optim_g.param_groups:
+            pg['lr'] = cur_lr
+        for pg in optim_d.param_groups:
+            pg['lr'] = cur_lr
         c, f0, spec, y, spk, lengths, uv,volume = items
         g = spk.cuda(rank, non_blocking=True)
         spec, y = spec.cuda(rank, non_blocking=True), y.cuda(rank, non_blocking=True)
@@ -148,6 +211,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         f0 = f0.cuda(rank, non_blocking=True)
         uv = uv.cuda(rank, non_blocking=True)
         lengths = lengths.cuda(rank, non_blocking=True)
+        volume = volume.cuda(rank, non_blocking=True) if volume is not None else None
         mel = spec_to_mel_torch(
             spec,
             hps.data.filter_length,
@@ -156,7 +220,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             hps.data.mel_fmin,
             hps.data.mel_fmax)
         
-        with autocast(enabled=hps.train.fp16_run, dtype=half_type):
+        with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
             y_hat, ids_slice, z_mask, \
             (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0 = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
                                                                                 spec_lengths=lengths,vol = volume)
@@ -177,7 +241,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             # Discriminator
             y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
 
-            with autocast(enabled=False, dtype=half_type):
+            with autocast('cuda', enabled=False, dtype=half_type):
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
                 loss_disc_all = loss_disc
         
@@ -188,15 +252,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         scaler.step(optim_d)
         
 
-        with autocast(enabled=hps.train.fp16_run, dtype=half_type):
+        with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
             # Generator
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
-            with autocast(enabled=False, dtype=half_type):
+            with autocast('cuda', enabled=False, dtype=half_type):
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                loss_lf0 = F.mse_loss(pred_lf0, lf0) if net_g.module.use_automatic_f0_prediction else 0
+                loss_lf0 = F.mse_loss(pred_lf0, lf0) if getattr(net_g, "module", net_g).use_automatic_f0_prediction else 0
                 loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
@@ -231,7 +295,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
                     "all/mel": utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy())
                 }
 
-                if net_g.module.use_automatic_f0_prediction:
+                if getattr(net_g, "module", net_g).use_automatic_f0_prediction:
                     image_dict.update({
                         "all/lf0": utils.plot_data_to_numpy(lf0[0, 0, :].cpu().numpy(),
                                                               pred_lf0[0, 0, :].detach().cpu().numpy()),
@@ -287,7 +351,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                 hps.data.sampling_rate,
                 hps.data.mel_fmin,
                 hps.data.mel_fmax)
-            y_hat,_ = generator.module.infer(c, f0, uv, g=g,vol = volume)
+            y_hat,_ = getattr(generator, "module", generator).infer(c, f0, uv, g=g,vol = volume)
 
             y_hat_mel = mel_spectrogram_torch(
                 y_hat.squeeze(1).float(),

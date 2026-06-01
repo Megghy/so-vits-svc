@@ -27,6 +27,22 @@ def download_dict():
     }
 
 
+def base_model_dict():
+    """主模型底模 G_0/D_0 的下载直链，按 speech_encoder 区分
+    (不同编码器 ssl_dim 不同，底模不通用)。
+
+    官方底模来源为 TBD(见 README)，仓库不内置直链。需要自动下载时，
+    在对应编码器下填入可直接 GET 的 .pth 链接即可；留空则训练时
+    仅尝试从 pretrain/ 本地复制，找不到就从零训练。
+    """
+    return {
+        # "vec768l12": {
+        #     "G_0.pth": "https://.../G_0.pth",
+        #     "D_0.pth": "https://.../D_0.pth",
+        # },
+    }
+
+
 def get_speech_encoder(config_path="configs/config.json"):
     import json
 

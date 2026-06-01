@@ -37,6 +37,11 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.spk_map = hparams.spk
         self.vol_emb = hparams.model.vol_embedding
         self.vol_aug = hparams.train.vol_aug and vol_aug
+        # 特征域增强（仅训练集），对已抽取的内容特征做扰动，避免重处理数据集
+        self.feature_aug = getattr(hparams.train, "feature_aug", False) and vol_aug
+        self.feat_noise = getattr(hparams.train, "feature_aug_noise", 0.0)
+        self.feat_time_mask = int(getattr(hparams.train, "feature_aug_time_mask", 0))
+        self.feat_chan_drop = getattr(hparams.train, "feature_aug_channel_dropout", 0.0)
         random.seed(1234)
         random.shuffle(self.audiopaths)
         
@@ -91,6 +96,19 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
             volume = volume[:lmin]
         return c, f0, spec, audio_norm, spk, uv, volume
 
+    def augment_content(self, c):
+        """对内容特征 c:[hidden_dim, T] 做特征域增强，提升音色解耦/鲁棒性。"""
+        if self.feat_noise > 0:
+            c = c + torch.randn_like(c) * (self.feat_noise * c.std())
+        if self.feat_time_mask > 0 and c.size(-1) > self.feat_time_mask:
+            width = random.randint(1, self.feat_time_mask)
+            start = random.randint(0, c.size(-1) - width)
+            c[:, start:start + width] = 0
+        if self.feat_chan_drop > 0:
+            keep = (torch.rand(c.size(0), device=c.device) >= self.feat_chan_drop).float()
+            c = c * keep.unsqueeze(-1) / max(1e-4, 1 - self.feat_chan_drop)
+        return c
+
     def random_slice(self, c, f0, spec, audio_norm, spk, uv, volume):
         # if spec.shape[1] < 30:
         #     print("skip too short audio:", filename)
@@ -116,6 +134,8 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
             audio_norm = audio_norm[:, start * self.hop_length : end * self.hop_length]
             if volume is not None:
                 volume = volume[start:end]
+        if self.feature_aug:
+            c = self.augment_content(c)
         return c, f0, spec, audio_norm, spk, uv,volume
 
     def __getitem__(self, index):

@@ -111,6 +111,21 @@ class GaussianDiffusion(nn.Module):
 
         self.register_buffer('spec_min', torch.FloatTensor([spec_min])[None, None, :out_dims])
         self.register_buffer('spec_max', torch.FloatTensor([spec_max])[None, None, :out_dims])
+        self._noise_schedule_cache = {}
+
+    def _noise_schedule(self, method, t):
+        cache_key = (method, int(t), str(self.betas.device))
+        if cache_key in self._noise_schedule_cache:
+            return self._noise_schedule_cache[cache_key]
+
+        if method == 'unipc':
+            from .uni_pc import NoiseScheduleVP
+        else:
+            from .dpm_solver_pytorch import NoiseScheduleVP
+
+        schedule = NoiseScheduleVP(schedule='discrete', betas=self.betas[:t])
+        self._noise_schedule_cache[cache_key] = schedule
+        return schedule
 
     def q_mean_variance(self, x_start, t):
         mean = extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
@@ -255,13 +270,9 @@ class GaussianDiffusion(nn.Module):
                         
             if method is not None and infer_speedup > 1:
                 if method == 'dpm-solver' or method == 'dpm-solver++':
-                    from .dpm_solver_pytorch import (
-                        DPM_Solver,
-                        NoiseScheduleVP,
-                        model_wrapper,
-                    )
+                    from .dpm_solver_pytorch import DPM_Solver, model_wrapper
                     # 1. Define the noise schedule.
-                    noise_schedule = NoiseScheduleVP(schedule='discrete', betas=self.betas[:t])
+                    noise_schedule = self._noise_schedule(method, t)
 
                     # 2. Convert your discrete-time `model` to the continuous-time
                     # noise prediction model. Here is an example for a diffusion model
@@ -337,9 +348,9 @@ class GaussianDiffusion(nn.Module):
                                 infer_speedup, cond=cond
                             )
                 elif method == 'unipc':
-                    from .uni_pc import NoiseScheduleVP, UniPC, model_wrapper
+                    from .uni_pc import UniPC, model_wrapper
                     # 1. Define the noise schedule.
-                    noise_schedule = NoiseScheduleVP(schedule='discrete', betas=self.betas[:t])
+                    noise_schedule = self._noise_schedule(method, t)
 
                     # 2. Convert your discrete-time `model` to the continuous-time
                     # noise prediction model. Here is an example for a diffusion model

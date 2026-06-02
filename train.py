@@ -114,13 +114,22 @@ def run(rank, n_gpus, hps):
     num_workers = getattr(hps.train, "num_workers", 2)
     if all_in_mem:
         num_workers = 0
-    train_loader = DataLoader(train_dataset, num_workers=num_workers, shuffle=False, pin_memory=False,
-                              batch_size=hps.train.batch_size, collate_fn=collate_fn,
-                              persistent_workers=num_workers > 0)
+    pin_memory = torch.cuda.is_available()
+    train_loader_kwargs = {
+        "num_workers": num_workers,
+        "shuffle": False,
+        "pin_memory": pin_memory,
+        "batch_size": hps.train.batch_size,
+        "collate_fn": collate_fn,
+        "persistent_workers": num_workers > 0,
+    }
+    if num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = getattr(hps.train, "prefetch_factor", 2)
+    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
     if rank == 0:
         eval_dataset = TextAudioSpeakerLoader(hps.data.validation_files, hps, all_in_mem=all_in_mem,vol_aug = False)
         eval_loader = DataLoader(eval_dataset, num_workers=0, shuffle=False,
-                                 batch_size=1, pin_memory=False,
+                                 batch_size=1, pin_memory=pin_memory,
                                  drop_last=False, collate_fn=collate_fn)
 
     net_g = SynthesizerTrn(
@@ -223,6 +232,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
     net_g.train()
     net_d.train()
     for batch_idx, items in enumerate(train_loader):
+        should_log = rank == 0 and global_step % hps.train.log_interval == 0
         cur_lr = get_lr(global_step, base_lr, warmup_steps, decay_steps)
         for pg in optim_g.param_groups:
             pg['lr'] = cur_lr
@@ -272,7 +282,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
         optim_d.zero_grad()
         scaler.scale(loss_disc_all).backward()
         scaler.unscale_(optim_d)
-        grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
+        grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None) if should_log else None
         scaler.step(optim_d)
         
 
@@ -290,12 +300,12 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
-        grad_norm_g = commons.clip_grad_value_(net_g.parameters(), None)
+        grad_norm_g = commons.clip_grad_value_(net_g.parameters(), None) if should_log else None
         scaler.step(optim_g)
         scaler.update()
 
         if rank == 0:
-            if global_step % hps.train.log_interval == 0:
+            if should_log:
                 lr = optim_g.param_groups[0]['lr']
                 losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_kl]
                 reference_loss=0
@@ -307,8 +317,9 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                     100. * batch_idx / len(train_loader)))
                 logger.info(f"Losses: {[x.item() for x in losses]}, step: {global_step}, lr: {lr}, reference_loss: {reference_loss}, mel_raw: {mel_raw.item():.4f}")
 
-                scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr,
-                               "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
+                scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr}
+                if grad_norm_d is not None and grad_norm_g is not None:
+                    scalar_dict.update({"grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g})
                 scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/mel_raw": mel_raw,
                                     "loss/g/kl": loss_kl, "loss/g/lf0": loss_lf0, "loss/g/speaker_adv": loss_speaker_adv,
                                     "loss/g/reference": reference_loss})

@@ -212,6 +212,7 @@ def create_dataset_tab(state):
                 with dpg.tooltip(dpg.last_item()):
                     dpg.add_text("内容特征提取器，须与训练页保持一致。\n"
                                  "· vec768l12：默认，唱歌综合最优(ssl_dim=768)\n"
+                                 "· vec768l12mix：预处理写 2304 维三层 ContentVec，模型内合并到 ssl_dim=768\n"
                                  "· wavlmlarge：WavLM-Large 第6层，解耦更强、咬字更准\n"
                                  "  (ssl_dim 自动设为 1024，需放置 pretrain/WavLM-Large.pt)\n"
                                  "· whisper+contentvec：双编码器(ssl_dim=2048)，质量上限最高、单说话人推荐\n"

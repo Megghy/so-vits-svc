@@ -21,7 +21,17 @@ class BigVGANDecoder(nn.Module):
             ) from exc
 
         self.mel_proj = nn.Conv1d(latent_channels, n_mel_channels, 1)
-        self.vocoder = bigvgan.BigVGAN.from_pretrained(model_name, use_cuda_kernel=use_cuda_kernel)
+        self.vocoder = bigvgan.BigVGAN._from_pretrained(
+            model_id=model_name,
+            revision=None,
+            cache_dir=None,
+            force_download=False,
+            proxies=None,
+            resume_download=False,
+            local_files_only=False,
+            token=None,
+            use_cuda_kernel=use_cuda_kernel,
+        )
         self.trainable = trainable
         if remove_weight_norm and hasattr(self.vocoder, "remove_weight_norm"):
             self.vocoder.remove_weight_norm()

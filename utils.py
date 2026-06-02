@@ -439,19 +439,15 @@ def repeat_expand_2d(content, target_len, mode = 'left'):
 
 def repeat_expand_2d_left(content, target_len):
     # content : [h, t]
-
     src_len = content.shape[-1]
-    target = content.new_zeros([content.shape[0], target_len])
-    temp = torch.arange(src_len+1) * target_len / src_len
-    current_pos = 0
-    for i in range(target_len):
-        if i < temp[current_pos+1]:
-            target[:, i] = content[:, current_pos]
-        else:
-            current_pos += 1
-            target[:, i] = content[:, current_pos]
-
-    return target
+    position = torch.arange(target_len, device=content.device)
+    index = torch.div(
+        position * src_len,
+        target_len,
+        rounding_mode="floor",
+    )
+    index = torch.minimum(index, position).clamp_max(src_len - 1)
+    return content.index_select(-1, index)
 
 
 # mode : 'nearest'| 'linear'| 'bilinear'| 'bicubic'| 'trilinear'| 'area'
@@ -476,23 +472,26 @@ def mix_model(model_paths,mix_rate,mode):
   return os.path.join(os.path.curdir,"output.pth")
   
 def change_rms(data1, sr1, data2, sr2, rate):  # 1是输入音频，2是输出音频,rate是2的占比 from RVC
-    # print(data1.max(),data2.max())
-    rms1 = librosa.feature.rms(
-        y=data1, frame_length=sr1 // 2 * 2, hop_length=sr1 // 2
-    )  # 每半秒一个点
-    rms2 = librosa.feature.rms(y=data2.detach().cpu().numpy(), frame_length=sr2 // 2 * 2, hop_length=sr2 // 2)
-    rms1 = torch.from_numpy(rms1).to(data2.device)
+    def rms_torch(audio, sr):
+        frame_length = sr // 2 * 2
+        hop_length = sr // 2
+        audio = torch.as_tensor(audio, dtype=data2.dtype, device=data2.device).flatten()
+        audio = F.pad(audio[None, None, :], (frame_length // 2, frame_length // 2)).flatten()
+        frames = audio.unfold(0, frame_length, hop_length)
+        return torch.sqrt(frames.square().mean(dim=1).clamp_min(1e-12))[None, :]
+
+    rms1 = rms_torch(data1, sr1)
+    rms2 = rms_torch(data2, sr2)
     rms1 = F.interpolate(
         rms1.unsqueeze(0), size=data2.shape[0], mode="linear"
     ).squeeze()
-    rms2 = torch.from_numpy(rms2).to(data2.device)
     rms2 = F.interpolate(
         rms2.unsqueeze(0), size=data2.shape[0], mode="linear"
     ).squeeze()
     rms2 = torch.max(rms2, torch.zeros_like(rms2) + 1e-6)
     data2 *= (
-        torch.pow(rms1, torch.tensor(1 - rate))
-        * torch.pow(rms2, torch.tensor(rate - 1))
+        torch.pow(rms1, torch.tensor(1 - rate, dtype=data2.dtype, device=data2.device))
+        * torch.pow(rms2, torch.tensor(rate - 1, dtype=data2.dtype, device=data2.device))
     )
     return data2
 

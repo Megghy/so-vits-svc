@@ -280,6 +280,20 @@ class Svc(object):
         c = c.unsqueeze(0)
         return c, f0, uv
     
+    def _load_infer_wav(self, source):
+        if isinstance(source, tuple):
+            wav, sr = source
+            wav = np.asarray(wav, dtype=np.float32)
+            if wav.ndim > 1:
+                wav = librosa.to_mono(wav.T)
+            if sr != self.target_sample:
+                wav = librosa.resample(wav, orig_sr=sr, target_sr=self.target_sample)
+            return np.ascontiguousarray(wav, dtype=np.float32)
+        if isinstance(source, np.ndarray):
+            return np.ascontiguousarray(source, dtype=np.float32)
+        wav, _ = librosa.load(source, sr=self.target_sample, mono=True)
+        return wav
+
     def infer(self, speaker, tran, raw_path,
               cluster_infer_ratio=0,
               auto_predict_f0=False,
@@ -294,7 +308,7 @@ class Svc(object):
               second_encoding = False,
               loudness_envelope_adjustment = 1
               ):
-        wav, sr = librosa.load(raw_path, sr=self.target_sample, mono=True)
+        wav = self._load_infer_wav(raw_path)
         if spk_mix:
             c, f0, uv = self.get_unit_f0(wav, tran, 0, None, f0_filter,f0_predictor,cr_threshold=cr_threshold)
             n_frames = f0.size(1)
@@ -315,13 +329,14 @@ class Svc(object):
         with torch.no_grad():
             start = time.time()
             vol = None
+            wav_tensor = torch.from_numpy(wav).to(self.dev)
             if not self.only_diffusion:
-                vol = self.volume_extractor.extract(torch.FloatTensor(wav).to(self.dev)[None,:])[None,:].to(self.dev) if self.vol_embedding else None
+                vol = self.volume_extractor.extract(wav_tensor[None,:])[None,:].to(self.dev) if self.vol_embedding else None
                 audio,f0 = self.net_g_ms.infer(c, f0=f0, g=sid, uv=uv, predict_f0=auto_predict_f0, noice_scale=noice_scale,vol=vol)
                 audio = audio[0,0].data.float()
                 audio_mel = self.vocoder.extract(audio[None,:],self.target_sample) if self.shallow_diffusion else None
             else:
-                audio = torch.FloatTensor(wav).to(self.dev)
+                audio = wav_tensor
                 audio_mel = None
             if self.dtype != torch.float32:
                 c = c.to(torch.float32)
@@ -348,7 +363,8 @@ class Svc(object):
                 infer=True, 
                 infer_speedup=self.diffusion_args.infer.speedup, 
                 method=self.diffusion_args.infer.method,
-                k_step=k_step)
+                k_step=k_step,
+                use_tqdm=False)
                 audio = self.vocoder.infer(audio_mel, f0).squeeze()
             if self.nsf_hifigan_enhance:
                 audio, _ = self.enhancer.enhance(
@@ -488,10 +504,7 @@ class Svc(object):
                 # padd
                 pad_len = int(audio_sr * pad_seconds)
                 dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
-                raw_path = io.BytesIO()
-                soundfile.write(raw_path, dat, audio_sr, format="wav")
-                raw_path.seek(0)
-                out_audio, out_sr, out_frame = self.infer(spk, tran, raw_path,
+                out_audio, out_sr, out_frame = self.infer(spk, tran, (dat, audio_sr),
                                                     cluster_infer_ratio=cluster_infer_ratio,
                                                     auto_predict_f0=auto_predict_f0,
                                                     noice_scale=noice_scale,

@@ -190,7 +190,7 @@ CONFIG_GROUPS = [
 # 路径 -> 字段定义，供分组渲染查表
 CONFIG_FIELD_MAP = {f[0]: f for f in CONFIG_FIELDS}
 
-# speech_encoder -> 期望 ssl_dim（与 preprocess_flist_config.py 的设定保持一致）
+# speech_encoder -> 模型内部输入维度。组合/多层编码器会先把预存特征合并到这个维度。
 ENCODER_DIM = {
     "vec768l12": 768, "vec768l12mix": 768, "dphubert": 768, "wavlmbase+": 768,
     "vec256l9": 256, "hubertsoft": 256,
@@ -198,6 +198,20 @@ ENCODER_DIM = {
     "whisper-ppg-large": 1280,
     "whisper+contentvec": 2048,
 }
+
+# speech_encoder -> 预处理写入 .soft.pt 的特征维度。
+ENCODER_FEATURE_DIM = {
+    **ENCODER_DIM,
+    "vec768l12mix": 2304,
+    "whisper+contentvec": 3584,
+}
+
+
+def normalize_encoder_dims(cfg):
+    m = cfg.get("model", {})
+    dim = ENCODER_DIM.get(m.get("speech_encoder"))
+    if dim is not None:
+        m["ssl_dim"] = dim
 
 
 def check_config(cfg):
@@ -211,9 +225,15 @@ def check_config(cfg):
     enc = m.get("speech_encoder")
     exp = ENCODER_DIM.get(enc)
     if exp is not None and m.get("ssl_dim") != exp:
-        out.append(("error",
-            f"speech_encoder={enc} 要求 ssl_dim={exp}，当前为 {m.get('ssl_dim')}。"
-            "通常是改了编码器但没重新预处理——需重抽特征并重训，否则维度不匹配会直接报错。"))
+        feature_dim = ENCODER_FEATURE_DIM.get(enc, exp)
+        if feature_dim != exp:
+            out.append(("error",
+                f"speech_encoder={enc} 的模型输入 ssl_dim 必须是 {exp}，当前为 {m.get('ssl_dim')}；"
+                f"{feature_dim} 是预处理特征维度，会在模型内合并到 {exp}。"))
+        else:
+            out.append(("error",
+                f"speech_encoder={enc} 要求 ssl_dim={exp}，当前为 {m.get('ssl_dim')}。"
+                "通常是改了编码器但没重新预处理——需重抽特征并重训，否则维度不匹配会直接报错。"))
     if enc == "whisper+contentvec" and not m.get("whisper_path"):
         out.append(("error", "whisper+contentvec 必须设置 model.whisper_path，训练和推理要使用同一个 Whisper 权重。"))
     if enc == "vec768l12mix" and m.get("ssl_dim") == 768:
@@ -326,6 +346,7 @@ def save_config(name, values):
             node[keys[-1]] = val
             changed.append(f"{path} = {val}")
     if changed:
+        normalize_encoder_dims(cfg)
         with open(config_path(name), "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     return changed
@@ -371,6 +392,7 @@ def patch_configs_for_project(name):
         cfg = load_config(name)
         cfg["data"]["training_files"] = train_list
         cfg["data"]["validation_files"] = val_list
+        normalize_encoder_dims(cfg)
         with open(config_path(name), "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     if os.path.exists(diff_config_path(name)):

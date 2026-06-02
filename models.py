@@ -476,6 +476,11 @@ class SynthesizerTrn(nn.Module):
         self.upsample_kernel_sizes = upsample_kernel_sizes
         self.segment_size = segment_size
         self.gin_channels = gin_channels
+        speech_encoder = kwargs.get("speech_encoder")
+        if speech_encoder == "whisper+contentvec":
+            ssl_dim = 2048
+        elif speech_encoder == "vec768l12mix":
+            ssl_dim = 768
         self.ssl_dim = ssl_dim
         self.vol_embedding = vol_embedding
         self.emb_g = nn.Embedding(n_speakers, gin_channels)
@@ -486,7 +491,7 @@ class SynthesizerTrn(nn.Module):
         if vol_embedding:
            self.emb_vol = nn.Linear(1, hidden_channels)
 
-        self.pre = nn.Conv1d(ssl_dim, hidden_channels, kernel_size=5, padding=2)
+        self.pre = nn.Conv1d(self.ssl_dim, hidden_channels, kernel_size=5, padding=2)
 
         self.enc_p = TextEncoder(
             inter_channels,
@@ -553,9 +558,9 @@ class SynthesizerTrn(nn.Module):
 
         # 组合编码器:预存特征为多分量拼接,进 pre 前先做可学习合并(3584→ssl_dim)
         self.content_merge = None
-        if kwargs.get("speech_encoder") == "whisper+contentvec":
+        if speech_encoder == "whisper+contentvec":
             self.content_merge = ContentMerge(whisper_dim=1280, cv_dim=768, cv_layers=3)
-        elif kwargs.get("speech_encoder") == "vec768l12mix":
+        elif speech_encoder == "vec768l12mix":
             self.content_merge = ContentVecLayerMerge(cv_dim=768, cv_layers=3)
         self.speaker_adv = None
         if self.use_speaker_adversarial:

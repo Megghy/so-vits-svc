@@ -29,7 +29,7 @@ hop_length = None
 speech_encoder = None
 
 
-def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extractor=None):
+def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extractor=None, volume_extractor=None):
     wav, sr = librosa.load(filename, sr=sampling_rate)
     audio_norm = torch.FloatTensor(wav)
     audio_norm = audio_norm.unsqueeze(0)
@@ -37,7 +37,8 @@ def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extracto
     if not os.path.exists(soft_path):
         wav16k = librosa.resample(wav, orig_sr=sampling_rate, target_sr=16000)
         wav16k = torch.from_numpy(wav16k).to(device)
-        c = hmodel.encoder(wav16k)
+        with torch.inference_mode():
+            c = hmodel.encoder(wav16k)
         torch.save(c.cpu(), soft_path)
 
     f0_path = filename + ".f0.npy"
@@ -76,7 +77,6 @@ def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extracto
 
     if diff or hps.model.vol_embedding:
         volume_path = filename + ".vol.npy"
-        volume_extractor = utils.Volume_Extractor(hop_length)
         if not os.path.exists(volume_path):
             volume = volume_extractor.extract(audio_norm)
             np.save(volume_path, volume.to('cpu').numpy())
@@ -84,22 +84,27 @@ def process_one(filename, hmodel, f0_predictor, device, diff=False, mel_extracto
     if diff:
         mel_path = filename + ".mel.npy"
         if not os.path.exists(mel_path) and mel_extractor is not None:
-            mel_t = mel_extractor.extract(audio_norm.to(device), sampling_rate)
+            with torch.inference_mode():
+                mel_t = mel_extractor.extract(audio_norm.to(device), sampling_rate)
             mel = mel_t.squeeze().to('cpu').numpy()
             np.save(mel_path, mel)
         aug_mel_path = filename + ".aug_mel.npy"
         aug_vol_path = filename + ".aug_vol.npy"
-        max_amp = float(torch.max(torch.abs(audio_norm))) + 1e-5
-        max_shift = min(1, np.log10(1/max_amp))
-        log10_vol_shift = random.uniform(-1, max_shift)
-        keyshift = random.uniform(-5, 5)
-        if mel_extractor is not None:
-            aug_mel_t = mel_extractor.extract(audio_norm * (10 ** log10_vol_shift), sampling_rate, keyshift = keyshift)
-        aug_mel = aug_mel_t.squeeze().to('cpu').numpy()
-        aug_vol = volume_extractor.extract(audio_norm * (10 ** log10_vol_shift))
-        if not os.path.exists(aug_mel_path):
+        need_aug_mel = not os.path.exists(aug_mel_path)
+        need_aug_vol = not os.path.exists(aug_vol_path)
+        if need_aug_mel or need_aug_vol:
+            max_amp = float(torch.max(torch.abs(audio_norm))) + 1e-5
+            max_shift = min(1, np.log10(1/max_amp))
+            log10_vol_shift = random.uniform(-1, max_shift)
+            keyshift = random.uniform(-5, 5)
+            aug_audio = audio_norm * (10 ** log10_vol_shift)
+        if need_aug_mel:
+            with torch.inference_mode():
+                aug_mel_t = mel_extractor.extract(aug_audio.to(device), sampling_rate, keyshift=keyshift)
+            aug_mel = aug_mel_t.squeeze().to('cpu').numpy()
             np.save(aug_mel_path,np.asanyarray((aug_mel,keyshift),dtype=object))
-        if not os.path.exists(aug_vol_path):
+        if need_aug_vol:
+            aug_vol = volume_extractor.extract(aug_audio)
             np.save(aug_vol_path,aug_vol.to('cpu').numpy())
 
 
@@ -125,10 +130,14 @@ def process_batch(file_chunk, f0p, diff=False, mel_extractor=None, device="cpu",
     logger.info(f"Loaded speech encoder for rank {rank}")
     f0_predictor = utils.get_f0_predictor(f0p, sampling_rate=sampling_rate, hop_length=hop_length, device=device, threshold=0.05)
     logger.info(f"Loaded f0 predictor {f0p} for rank {rank}")
+    volume_extractor = utils.Volume_Extractor(hop_length) if diff or hps.model.vol_embedding else None
     for filename in tqdm(file_chunk, position = rank):
-        process_one(filename, hmodel, f0_predictor, device, diff, mel_extractor)
+        process_one(filename, hmodel, f0_predictor, device, diff, mel_extractor, volume_extractor)
 
 def parallel_process(filenames, num_processes, f0p, diff, mel_extractor, device, hps_param):
+    if not filenames:
+        return
+    num_processes = min(num_processes, len(filenames))
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
         tasks = []
         for i in range(num_processes):

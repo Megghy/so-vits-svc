@@ -123,7 +123,8 @@ class Svc(object):
                  shallow_diffusion = False,
                  only_diffusion = False,
                  spk_mix_enable = False,
-                 feature_retrieval = False
+                 feature_retrieval = False,
+                 half_precision = True
                  ):
         self.net_g_path = net_g_path
         self.only_diffusion = only_diffusion
@@ -133,6 +134,13 @@ class Svc(object):
             self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.dev = torch.device(device)
+
+        # Auto-detect optimal dtype: BF16 for Ampere+, FP16 for older, FP32 for CPU
+        if half_precision and torch.cuda.is_available():
+            compute_cap = torch.cuda.get_device_capability(self.dev)
+            self.dtype = torch.bfloat16 if compute_cap[0] >= 8 else torch.float16
+        else:
+            self.dtype = torch.float32
         self.net_g_ms = None
         if not self.only_diffusion:
             self.hps_ms = utils.get_hparams_from_file(config_path,True)
@@ -142,6 +150,7 @@ class Svc(object):
             self.unit_interpolate_mode = self.hps_ms.data.unit_interpolate_mode if self.hps_ms.data.unit_interpolate_mode is not None else 'left'
             self.vol_embedding = self.hps_ms.model.vol_embedding if self.hps_ms.model.vol_embedding is not None else False
             self.speech_encoder = self.hps_ms.model.speech_encoder if self.hps_ms.model.speech_encoder is not None else 'vec768l12'
+            self.whisper_path = getattr(self.hps_ms.model, "whisper_path", "pretrain/large-v3.pt")
  
         self.nsf_hifigan_enhance = nsf_hifigan_enhance
         if self.shallow_diffusion or self.only_diffusion:
@@ -151,22 +160,37 @@ class Svc(object):
                     self.target_sample = self.diffusion_args.data.sampling_rate
                     self.hop_size = self.diffusion_args.data.block_size
                     self.spk2id = self.diffusion_args.spk
-                    self.dtype = torch.float32
                     self.speech_encoder = self.diffusion_args.data.encoder
+                    self.whisper_path = getattr(self.diffusion_args.data, "whisper_path", "pretrain/large-v3.pt")
                     self.unit_interpolate_mode = self.diffusion_args.data.unit_interpolate_mode if self.diffusion_args.data.unit_interpolate_mode is not None else 'left'
                 if spk_mix_enable:
                     self.diffusion_model.init_spkmix(len(self.spk2id))
             else:
                 print("No diffusion model or config found. Shallow diffusion mode will False")
                 self.shallow_diffusion = self.only_diffusion = False
+
+        if cluster_model_path and self.speech_encoder == "whisper+contentvec":
+            raise RuntimeError("whisper+contentvec does not support cluster inference or feature retrieval")
                 
         # load hubert and model
         if not self.only_diffusion:
             self.load_model(spk_mix_enable)
-            self.hubert_model = utils.get_speech_encoder(self.speech_encoder,device=self.dev)
+            self.hubert_model = utils.get_speech_encoder(
+                self.speech_encoder,
+                device=self.dev,
+                whisper_path=self.whisper_path,
+            )
+            if self.dtype != torch.float32:
+                self.hubert_model = self.hubert_model.to(self.dtype)
             self.volume_extractor = utils.Volume_Extractor(self.hop_size)
         else:
-            self.hubert_model = utils.get_speech_encoder(self.diffusion_args.data.encoder,device=self.dev)
+            self.hubert_model = utils.get_speech_encoder(
+                self.diffusion_args.data.encoder,
+                device=self.dev,
+                whisper_path=self.whisper_path,
+            )
+            if self.dtype != torch.float32:
+                self.hubert_model = self.hubert_model.to(self.dtype)
             self.volume_extractor = utils.Volume_Extractor(self.diffusion_args.data.block_size)
             
         if os.path.exists(cluster_model_path):
@@ -202,6 +226,8 @@ class Svc(object):
             self.net_g_ms.EnableCharacterMix(len(self.spk2id), self.dev)
 
     def get_unit_f0(self, wav, tran, cluster_infer_ratio, speaker, f0_filter ,f0_predictor,cr_threshold=0.05):
+        if cluster_infer_ratio != 0 and self.speech_encoder == "whisper+contentvec":
+            raise RuntimeError("whisper+contentvec does not support cluster inference or feature retrieval")
 
         if not hasattr(self,"f0_predictor_object") or self.f0_predictor_object is None or f0_predictor != self.f0_predictor_object.name:
             self.f0_predictor_object = utils.get_f0_predictor(f0_predictor,hop_length=self.hop_size,sampling_rate=self.target_sample,device=self.dev,threshold=cr_threshold)
@@ -220,14 +246,15 @@ class Svc(object):
         if not hasattr(self,"audio16k_resample_transform"):
             self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample, 16000).to(self.dev)
         wav16k = self.audio16k_resample_transform(wav[None,:])[0]
-        
-        c = self.hubert_model.encoder(wav16k)
+
+        with torch.cuda.amp.autocast(enabled=self.dtype != torch.float32, dtype=self.dtype):
+            c = self.hubert_model.encoder(wav16k)
         c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1],self.unit_interpolate_mode)
 
         if cluster_infer_ratio !=0:
             if self.feature_retrieval:
                 speaker_id = self.spk2id.get(speaker)
-                if not speaker_id and type(speaker) is int:
+                if speaker_id is None and type(speaker) is int:
                     if len(self.spk2id.__dict__) >= speaker:
                         speaker_id = speaker
                 if speaker_id is None:
@@ -274,7 +301,7 @@ class Svc(object):
             sid = speaker[:, frame:frame+n_frames].transpose(0,1)
         else:
             speaker_id = self.spk2id.get(speaker)
-            if not speaker_id and type(speaker) is int:
+            if speaker_id is None and type(speaker) is int:
                 if len(self.spk2id.__dict__) >= speaker:
                     speaker_id = speaker
             if speaker_id is None:
@@ -306,7 +333,8 @@ class Svc(object):
                     if not hasattr(self,"audio16k_resample_transform"):
                         self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample, 16000).to(self.dev)
                     audio16k = self.audio16k_resample_transform(audio[None,:])[0]
-                    c = self.hubert_model.encoder(audio16k)
+                    with torch.cuda.amp.autocast(enabled=self.dtype != torch.float32, dtype=self.dtype):
+                        c = self.hubert_model.encoder(audio16k)
                     c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1],self.unit_interpolate_mode)
                 f0 = f0[:,:,None]
                 c = c.transpose(-1,-2)

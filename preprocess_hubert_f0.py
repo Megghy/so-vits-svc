@@ -117,7 +117,11 @@ def process_batch(file_chunk, f0p, diff=False, mel_extractor=None, device="cpu",
         gpu_id = rank % torch.cuda.device_count()
         device = torch.device(f"cuda:{gpu_id}")
     logger.info(f"Rank {rank} uses device {device}")
-    hmodel = utils.get_speech_encoder(speech_encoder, device=device)
+    hmodel = utils.get_speech_encoder(
+        speech_encoder,
+        device=device,
+        whisper_path=getattr(hps.model, "whisper_path", "pretrain/large-v3.pt"),
+    )
     logger.info(f"Loaded speech encoder for rank {rank}")
     f0_predictor = utils.get_f0_predictor(f0p, sampling_rate=sampling_rate, hop_length=hop_length, device=device, threshold=0.05)
     logger.info(f"Loaded f0 predictor {f0p} for rank {rank}")

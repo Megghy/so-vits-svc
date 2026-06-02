@@ -3,6 +3,7 @@ data:
   block_size: 512 # Equal to hop_length
   duration: 2 # Audio duration during training, must be less than the duration of the shortest audio clip
   encoder: 'vec768l12' # 'hubertsoft', 'vec256l9', 'vec768l12'
+  whisper_path: 'pretrain/large-v3.pt'
   cnhubertsoft_gate: 10
   encoder_sample_rate: 16000
   encoder_hop_size: 320

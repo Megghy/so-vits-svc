@@ -203,6 +203,11 @@ def _start_train(state):
     cmd = backend.train_cmd(config.config_path(proj), proj)
     state["jobs"]["train"].start(cmd)
 
+    # 自动启动 TensorBoard(已运行则跳过)
+    from . import ui_tensorboard
+    tb_tip = ui_tensorboard.ensure_started(state, config.log_dir(proj))
+    dpg.set_value("train_msg", tip + "  " + tb_tip)
+
 
 def _stop_train(state):
     state["target_step"] = 0

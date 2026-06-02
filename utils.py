@@ -117,7 +117,7 @@ def get_f0_predictor(f0_predictor,hop_length,sampling_rate,**kargs):
         raise Exception("Unknown f0 predictor")
     return f0_predictor_object
 
-def get_speech_encoder(speech_encoder,device=None,**kargs):
+def get_speech_encoder(speech_encoder, device=None, **kargs):
     if speech_encoder == "vec768l12":
         from vencoder.ContentVec768L12 import ContentVec768L12
         speech_encoder_object = ContentVec768L12(device = device)
@@ -153,7 +153,7 @@ def get_speech_encoder(speech_encoder,device=None,**kargs):
         speech_encoder_object = DPHubert(device = device)
     elif speech_encoder == "whisper-ppg-large":
         from vencoder.WhisperPPGLarge import WhisperPPGLarge
-        speech_encoder_object = WhisperPPGLarge(device = device)
+        speech_encoder_object = WhisperPPGLarge(vec_path=kargs.get("whisper_path", "pretrain/large-v3.pt"), device = device)
     elif speech_encoder == "wavlmbase+":
         from vencoder.WavLMBasePlus import WavLMBasePlus
         speech_encoder_object = WavLMBasePlus(device = device)
@@ -165,7 +165,10 @@ def get_speech_encoder(speech_encoder,device=None,**kargs):
         speech_encoder_object = EtaWavLMLarge(device = device)
     elif speech_encoder == "whisper+contentvec":
         from vencoder.WhisperContentVec import WhisperContentVec
-        speech_encoder_object = WhisperContentVec(device = device)
+        speech_encoder_object = WhisperContentVec(
+            whisper_path=kargs.get("whisper_path", "pretrain/large-v3.pt"),
+            device = device
+        )
     else:
         raise Exception("Unknown speech encoder")
     return speech_encoder_object 
@@ -184,22 +187,36 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, skip_optimizer=False
     else:
         state_dict = model.state_dict()
     new_state_dict = {}
+    missing, shape_mismatch = [], []
     for k, v in state_dict.items():
-        try:
-            # assert "dec" in k or "disc" in k
-            # print("load", k)
+        if k not in saved_state_dict:
+            new_state_dict[k] = v
+            if not any(s in k for s in ("enc_q", "emb_g")):
+                missing.append(k)
+        elif saved_state_dict[k].shape != v.shape:
+            new_state_dict[k] = v
+            shape_mismatch.append((k, tuple(saved_state_dict[k].shape), tuple(v.shape)))
+        else:
             new_state_dict[k] = saved_state_dict[k]
-            assert saved_state_dict[k].shape == v.shape, (saved_state_dict[k].shape, v.shape)
-        except Exception:
-            if "enc_q" not in k or "emb_g" not in k:
-              print("%s is not in the checkpoint,please check your checkpoint.If you're using pretrain model,just ignore this warning." % k)
-              logger.info("%s is not in the checkpoint" % k)
-              new_state_dict[k] = v
+    if missing:
+        print("[底模] 以下层不在 checkpoint 中，将随机初始化（用预训练底模续训时通常可忽略）：")
+        for k in missing:
+            print(f"    - {k}")
+    if shape_mismatch:
+        print("=" * 70)
+        print("[底模][警告] 以下层与 checkpoint 形状不匹配，已跳过、保留随机初始化！")
+        print("  这通常意味着底模与当前模型结构不符（如编码器/ssl_dim 不同）。")
+        print("  若 pre/content_merge/enc_p 等前端层在列，前后端分布会错位，")
+        print("  训练初期输出可能全是噪音——请确认用的是匹配当前编码器的底模。")
+        for k, ck_shape, model_shape in shape_mismatch:
+            print(f"    - {k}: checkpoint{ck_shape} vs model{model_shape}")
+        print("=" * 70)
+        logger.warning("load_checkpoint: %d layers shape-mismatched and randomly initialized: %s"
+                       % (len(shape_mismatch), [k for k, _, _ in shape_mismatch]))
     if hasattr(model, 'module'):
         model.module.load_state_dict(new_state_dict)
     else:
         model.load_state_dict(new_state_dict)
-    print("load ")
     logger.info("Loaded checkpoint '{}' (iteration {})".format(
         checkpoint_path, iteration))
     return model, optimizer, learning_rate, iteration
@@ -421,7 +438,7 @@ def repeat_expand_2d_left(content, target_len):
     # content : [h, t]
 
     src_len = content.shape[-1]
-    target = torch.zeros([content.shape[0], target_len], dtype=torch.float).to(content.device)
+    target = content.new_zeros([content.shape[0], target_len])
     temp = torch.arange(src_len+1) * target_len / src_len
     current_pos = 0
     for i in range(target_len):

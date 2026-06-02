@@ -74,6 +74,27 @@ def create_tensorboard_tab(state):
         add_log_panel("tb_log", "tb_log_win", 400)
 
 
+def ensure_started(state, logdir):
+    """确保 TensorBoard 正在运行；已在运行则跳过。供训练启动时自动调用。
+    返回一句状态提示供调用方展示。"""
+    port = dpg.get_value("tb_port")
+    if state["jobs"]["tb"].running():
+        return f"TensorBoard 已在运行(端口 {port})"
+    if not os.path.isdir(logdir):
+        return "TensorBoard 未启动(日志目录不存在)"
+    dpg.set_value("tb_logdir", logdir)
+    bind_all = dpg.get_value("tb_bind_all")
+    cmd = [backend.PYTHON, "-m", "tensorboard.main",
+           "--logdir", logdir,
+           "--port", str(port)]
+    if bind_all:
+        cmd += ["--bind_all"]
+    state["jobs"]["tb"].buf.clear()
+    state["jobs"]["tb"].start(cmd)
+    dpg.set_value("tb_status", f"TensorBoard 已启动在端口 {port}")
+    return f"已自动启动 TensorBoard(端口 {port})"
+
+
 def _start_tensorboard(state):
     """启动 TensorBoard"""
     logdir = dpg.get_value("tb_logdir")

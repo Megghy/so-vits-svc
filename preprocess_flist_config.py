@@ -98,11 +98,13 @@ if __name__ == "__main__":
         d_config_template = du.load_config("configs_template/diffusion_template.yaml")
     d_config_template["model"]["n_spk"] = spk_id
     d_config_template["data"]["encoder"] = args.speech_encoder
+    d_config_template["data"]["whisper_path"] = config_template["model"].get("whisper_path", "pretrain/large-v3.pt")
     d_config_template["spk"] = spk_dict
     
     config_template["spk"] = spk_dict
     config_template["model"]["n_speakers"] = spk_id
     config_template["model"]["speech_encoder"] = args.speech_encoder
+    config_template["model"].setdefault("whisper_path", "pretrain/large-v3.pt")
     
     if args.speech_encoder == "vec768l12" or args.speech_encoder == "dphubert" or args.speech_encoder == "wavlmbase+":
         config_template["model"]["ssl_dim"] = config_template["model"]["filter_channels"] = config_template["model"]["gin_channels"] = 768

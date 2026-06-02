@@ -1,5 +1,5 @@
 import logging
-import multiprocessing
+import math
 import os
 import time
 
@@ -33,12 +33,17 @@ start_time = time.time()
 # os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'INFO'
 
 
-def warmup_lr(step, base_lr, warmup_steps):
-    """前 warmup_steps 线性升到 base_lr，之后恒定 base_lr。
-    无衰减、无状态——续训天然一致，不依赖预先设定的总步数。"""
+def get_lr(step, base_lr, warmup_steps, decay_steps, min_ratio=0.1):
+    """前 warmup_steps 线性升到 base_lr；之后 cosine 衰减到 base_lr*min_ratio，
+    在 warmup_steps→decay_steps 区间内完成衰减，超过 decay_steps 恒定在地板值。
+    全程仅依赖 global_step，续训按 step 自动接上，无额外状态。"""
     if warmup_steps > 0 and step < warmup_steps:
         return base_lr * (step + 1) / warmup_steps
-    return base_lr
+    if step >= decay_steps:
+        return base_lr * min_ratio
+    progress = (step - warmup_steps) / max(1, decay_steps - warmup_steps)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return base_lr * (min_ratio + (1.0 - min_ratio) * cosine)
 
 
 def ensure_base_models(model_dir, speech_encoder):
@@ -56,9 +61,13 @@ def ensure_base_models(model_dir, speech_encoder):
     urls = base_model_dict().get(speech_encoder, {})
     for fname in ("G_0.pth", "D_0.pth"):
         dst = os.path.join(model_dir, fname)
-        # 本地查找顺序：编码器专属子目录 -> pretrain 根目录
-        local = next((p for p in (os.path.join("pretrain", speech_encoder, fname),
-                                   os.path.join("pretrain", fname)) if os.path.exists(p)), None)
+        # 本地查找：编码器专属子目录。pretrain 根目录的 G_0/D_0 是 vec768l12 专属(768维)，
+        # 不能跨 ssl_dim 复用——否则 pre/content_merge 等不匹配层会被 load_checkpoint 静默
+        # 随机初始化，却保留了预训练 decoder，前后端分布错位导致输出全是噪音。
+        candidates = [os.path.join("pretrain", speech_encoder, fname)]
+        if speech_encoder == "vec768l12":
+            candidates.append(os.path.join("pretrain", fname))
+        local = next((p for p in candidates if os.path.exists(p)), None)
         if local:
             shutil.copy2(local, dst)
             print(f"[底模] 已复制 {local} -> {dst}")
@@ -94,9 +103,7 @@ def run(rank, n_gpus, hps):
         logger = utils.get_logger(hps.model_dir)
         logger.info(hps)
         utils.check_git_hash(hps.model_dir)
-        writer = SummaryWriter(log_dir=hps.model_dir)
-        writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
-    
+
     # for pytorch on win, backend use gloo    
     dist.init_process_group(backend=  'gloo' if os.name == 'nt' else 'nccl', init_method='env://', world_size=n_gpus, rank=rank)
     torch.manual_seed(hps.train.seed)
@@ -104,14 +111,15 @@ def run(rank, n_gpus, hps):
     collate_fn = TextAudioCollate()
     all_in_mem = hps.train.all_in_mem   # If you have enough memory, turn on this option to avoid disk IO and speed up training.
     train_dataset = TextAudioSpeakerLoader(hps.data.training_files, hps, all_in_mem=all_in_mem)
-    num_workers = 5 if multiprocessing.cpu_count() > 4 else multiprocessing.cpu_count()
+    num_workers = getattr(hps.train, "num_workers", 2)
     if all_in_mem:
         num_workers = 0
-    train_loader = DataLoader(train_dataset, num_workers=num_workers, shuffle=False, pin_memory=True,
-                              batch_size=hps.train.batch_size, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, num_workers=num_workers, shuffle=False, pin_memory=False,
+                              batch_size=hps.train.batch_size, collate_fn=collate_fn,
+                              persistent_workers=num_workers > 0)
     if rank == 0:
         eval_dataset = TextAudioSpeakerLoader(hps.data.validation_files, hps, all_in_mem=all_in_mem,vol_aug = False)
-        eval_loader = DataLoader(eval_dataset, num_workers=1, shuffle=False,
+        eval_loader = DataLoader(eval_dataset, num_workers=0, shuffle=False,
                                  batch_size=1, pin_memory=False,
                                  drop_last=False, collate_fn=collate_fn)
 
@@ -166,6 +174,12 @@ def run(rank, n_gpus, hps):
         epoch_str = 1
         global_step = 0
 
+    if rank == 0:
+        # purge_step 让 TensorBoard 隐藏所有 step >= global_step 的旧 event，
+        # 避免续训时权重 step 落后于已记录 step 导致曲线回溯。
+        writer = SummaryWriter(log_dir=hps.model_dir, purge_step=global_step)
+        writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"), purge_step=global_step)
+
     scaler = GradScaler('cuda', enabled=hps.train.fp16_run and hps.train.half_type != "bf16")
 
     for epoch in range(epoch_str, hps.train.epochs + 1):
@@ -188,6 +202,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
 
     base_lr = hps.train.learning_rate
     warmup_steps = hps.train.warmup_epochs * len(train_loader)
+    decay_steps = getattr(hps.train, "lr_decay_steps", 100000)
 
     # train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -195,7 +210,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
     net_g.train()
     net_d.train()
     for batch_idx, items in enumerate(train_loader):
-        cur_lr = warmup_lr(global_step, base_lr, warmup_steps)
+        cur_lr = get_lr(global_step, base_lr, warmup_steps, decay_steps)
         for pg in optim_g.param_groups:
             pg['lr'] = cur_lr
         for pg in optim_d.param_groups:
@@ -272,15 +287,16 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                 reference_loss=0
                 for i in losses:
                     reference_loss += i
+                mel_raw = loss_mel / hps.train.c_mel
                 logger.info('Train Epoch: {} [{:.0f}%]'.format(
                     epoch,
                     100. * batch_idx / len(train_loader)))
-                logger.info(f"Losses: {[x.item() for x in losses]}, step: {global_step}, lr: {lr}, reference_loss: {reference_loss}")
+                logger.info(f"Losses: {[x.item() for x in losses]}, step: {global_step}, lr: {lr}, reference_loss: {reference_loss}, mel_raw: {mel_raw.item():.4f}")
 
                 scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr,
                                "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
-                scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/kl": loss_kl,
-                                    "loss/g/lf0": loss_lf0})
+                scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/mel_raw": mel_raw,
+                                    "loss/g/kl": loss_kl, "loss/g/lf0": loss_lf0, "loss/g/reference": reference_loss})
 
                 # scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
                 # scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})

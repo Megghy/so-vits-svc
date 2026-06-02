@@ -42,6 +42,11 @@ CONFIG_FIELDS = [
      "半精度类型。4080S用bf16更稳定，30/40系老卡用fp16。"),
     ("train.all_in_mem", "全量载入内存", "bool", False, None,
      "数据集全部加载到内存，加速训练但吃内存。32G+可开。"),
+    ("train.num_workers", "DataLoader进程数", "int", 2, (0, 16),
+     "数据加载子进程数。Windows 用 spawn，每个 worker 复制一份内存，\n"
+     "进程数越多内存提交越高(易撑大 C 盘 pagefile 甚至 OOM 杀 worker)。\n"
+     "显存/内存紧张就调小(2~3 通常够喂单卡)，内存富裕可调大加速。0=主进程加载。\n"
+     "all_in_mem=true 时强制为 0。"),
     ("data.sampling_rate", "采样率", "int", 44100, (22050, 48000),
      "音频采样率。官方默认44100，不建议改。"),
     ("model.speech_encoder", "内容编码器", "combo", "vec768l12", SPEECH_ENCODERS,
@@ -55,6 +60,8 @@ CONFIG_FIELDS = [
      "  需放置 pretrain/large-v3.pt(`python download_whisper.py`)，预处理较慢、特征体积约 3.7×\n"
      "· cnhubertlarge/whisper-ppg：偏说话\n"
      "切换后必须重新预处理(重抽特征)并重训。"),
+    ("model.whisper_path", "Whisper权重路径", "str", "pretrain/large-v3.pt", None,
+     "whisper+contentvec 使用的 Whisper 权重路径。训练和推理必须保持一致。"),
     # ===== 判别器增强（BigVGAN-v2，仅影响训练，不改推理）=====
     ("model.use_cqt_disc", "CQT 判别器", "bool", False, None,
      "MS-SB-CQT 多尺度子带常Q变换判别器(BigVGAN-v2)。\n"
@@ -122,7 +129,11 @@ CONFIG_FIELDS = [
      "Lion 通常用更大值(如 0.1~0.5)。0=关闭。"),
     ("train.warmup_epochs", "warmup epochs", "int", 0, (0, 50),
      "学习率预热轮数，按 step 换算(warmup_epochs × 每epoch步数)线性升到设定学习率。\n"
-     "预热结束后 lr 恒定不衰减(无状态、续训一致)。0=不预热。"),
+     "预热结束后进入 cosine 衰减(见 lr_decay_steps)。0=不预热。"),
+    ("train.lr_decay_steps", "cosine衰减步数", "int", 100000, (1000, 2000000),
+     "warmup 之后 lr 在 [warmup_steps, lr_decay_steps] 区间内 cosine 衰减到峰值的 1/10，\n"
+     "超过该 step 后恒定地板值。按 step 计(与 batch_size 无关)，续训按 global_step 自动接上。\n"
+     "参考：当前 step/epoch ≈ 数据量/batch_size，想跑 N epoch 就填 N×每epoch步数。"),
     ("train.c_mel", "梅尔损失权重(c_mel)", "int", 45, (1, 100),
      "重建梅尔频谱损失权重，默认 45。调大更重视音质细节。"),
     ("train.c_kl", "KL损失权重(c_kl)", "float", 1.0, (0.1, 5.0),
@@ -136,8 +147,8 @@ CONFIG_FIELDS = [
 CONFIG_GROUPS = [
     ("基础训练", ["train.batch_size", "train.learning_rate", "train.epochs",
                   "train.eval_interval", "train.log_interval", "train.keep_ckpts",
-                  "train.fp16_run", "train.half_type", "train.all_in_mem"], True),
-    ("模型与编码器", ["data.sampling_rate", "model.speech_encoder"], True),
+                  "train.fp16_run", "train.half_type", "train.all_in_mem", "train.num_workers"], True),
+    ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path"], True),
     ("判别器增强 (BigVGAN-v2，仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
                                           "model.use_mbd_disc"], True),
     ("数据增强", ["train.vol_aug", "train.feature_aug", "train.feature_aug_noise",
@@ -146,7 +157,7 @@ CONFIG_GROUPS = [
                                           "model.n_layers_trans_flow", "model.use_depthwise_conv",
                                           "model.use_automatic_f0_prediction", "model.speaker_embedding"], False),
     ("高级训练超参 (不常用)", ["train.optimizer", "train.weight_decay", "train.warmup_epochs",
-                              "train.c_mel", "train.c_kl", "train.seed"], False),
+                              "train.lr_decay_steps", "train.c_mel", "train.c_kl", "train.seed"], False),
 ]
 
 # 路径 -> 字段定义，供分组渲染查表
@@ -176,6 +187,8 @@ def check_config(cfg):
         out.append(("error",
             f"speech_encoder={enc} 要求 ssl_dim={exp}，当前为 {m.get('ssl_dim')}。"
             "通常是改了编码器但没重新预处理——需重抽特征并重训，否则维度不匹配会直接报错。"))
+    if enc == "whisper+contentvec" and not m.get("whisper_path"):
+        out.append(("error", "whisper+contentvec 必须设置 model.whisper_path，训练和推理要使用同一个 Whisper 权重。"))
 
     # Lion / AdamW 超参
     opt = (t.get("optimizer") or "adamw").lower()

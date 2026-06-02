@@ -337,6 +337,49 @@ def patch_configs_for_project(name):
             yaml.safe_dump(dcfg, f, allow_unicode=True, sort_keys=False)
 
 
+def dataset_44k_dir():
+    """重采样/特征文件的输出目录(训练时每步从此处读取 .soft.pt/.f0.npy/.spec.pt)。
+    默认 ROOT/dataset/44k；可在数据集页自定义为 SSD 路径,加速机械硬盘上的训练读取。"""
+    val = load_settings().get("dataset", {}).get("ds_outdir", "").strip()
+    if not val:
+        return os.path.join(ROOT, "dataset", "44k")
+    return val if os.path.isabs(val) else os.path.join(ROOT, val)
+
+
+def _outdir_prefix():
+    """44k 输出目录用于写进 filelist 的前缀：跨盘时为绝对路径，否则相对 ROOT，统一正斜杠。
+    与 preprocess_flist_config.py 写 filelist 的拼接方式保持一致。"""
+    p = dataset_44k_dir()
+    try:
+        p = os.path.relpath(p, ROOT)
+    except ValueError:
+        pass
+    return p.replace("\\", "/")
+
+
+def rewrite_filelist_to_outdir(name):
+    """把工程 filelist(train/val)内每行音频路径的目录前缀替换为当前的 44k 输出目录，
+    保留原有的 train/val 划分与说话人(取每行倒数第二段为说话人名)。返回改写的总行数。
+    用途：手动把数据集挪到新目录后，让训练用的 filelist 指向新位置，无需重抽特征。"""
+    prefix = _outdir_prefix()
+    total = 0
+    for fn in ("train.txt", "val.txt"):
+        path = os.path.join(filelist_dir(name), fn)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        out = []
+        for ln in lines:
+            parts = ln.replace("\\", "/").split("/")
+            spk, fname = parts[-2], parts[-1]
+            out.append(f"{prefix}/{spk}/{fname}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+        total += len(out)
+    return total
+
+
 def scan_dataset(root_dir):
     """扫描 {root}/{说话人}/*.<audio>，返回 [(说话人, 文件数, 时长秒), ...], 总文件数, 总时长秒。"""
     base = root_dir if os.path.isabs(root_dir) else os.path.join(ROOT, root_dir)

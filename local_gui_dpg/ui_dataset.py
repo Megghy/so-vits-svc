@@ -2,8 +2,8 @@
 """数据集预处理标签页 UI"""
 import os
 import dearpygui.dearpygui as dpg
-from . import config, backend
-from .ui_log import clear_job_log
+from . import config, backend, ui_dialogs
+from .ui_log import clear_job_log, add_log_panel
 
 
 def _fmt_dur(sec):
@@ -14,6 +14,7 @@ def _fmt_dur(sec):
 
 DATASET_SETTING_KEYS = (
     "ds_scandir",
+    "ds_outdir",
     "rs_sr",
     "rs_skip_loudnorm",
     "rs_numproc",
@@ -52,16 +53,38 @@ def _save_all_dataset_settings():
     config.save_settings(settings)
 
 
-def _choose_dataset_dir(data):
-    path = data["file_path_name"]
-    dpg.set_value("ds_scandir", path)
-    _save_dataset_setting("ds_scandir", path)
+def _browse_scandir():
+    p = ui_dialogs.pick_directory("选择源数据集目录")
+    if p:
+        dpg.set_value("ds_scandir", p)
+        _save_dataset_setting("ds_scandir", p)
 
 
-def _choose_eta_dir(data):
-    path = data["file_path_name"]
-    dpg.set_value("ds_eta_dir", path)
-    _save_dataset_setting("ds_eta_dir", path)
+def _browse_outdir():
+    p = ui_dialogs.pick_directory("选择 44k 输出目录")
+    if p:
+        dpg.set_value("ds_outdir", p)
+        _save_dataset_setting("ds_outdir", p)
+
+
+def _browse_eta_dir():
+    p = ui_dialogs.pick_directory("选择多说话人语料目录")
+    if p:
+        dpg.set_value("ds_eta_dir", p)
+        _save_dataset_setting("ds_eta_dir", p)
+
+
+def _sync_filelist(state):
+    if not state["current_project"]:
+        dpg.set_value("ds_pipe_msg", "请先创建/选择工程。")
+        return
+    _save_all_dataset_settings()
+    proj = state["current_project"]
+    n = config.rewrite_filelist_to_outdir(proj)
+    if n:
+        dpg.set_value("ds_pipe_msg", f"已更新 filelist {n} 行 → {config.dataset_44k_dir()}")
+    else:
+        dpg.set_value("ds_pipe_msg", "未找到 filelist，请先生成配置。")
 
 
 def _eta_proj_path():
@@ -112,6 +135,7 @@ def create_dataset_tab(state):
     cpu = os.cpu_count() or 4
     settings = config.load_settings()
     default_scan_dir = os.path.relpath(backend.DATASET_RAW, backend.ROOT)
+    default_out_dir = os.path.join("dataset", "44k")
 
     with dpg.child_window(tag="tab_dataset"):
         # 数据集概览
@@ -121,7 +145,7 @@ def create_dataset_tab(state):
                 dpg.add_input_text(tag="ds_scandir",
                                    default_value=_saved_value(settings, "ds_scandir", default_scan_dir),
                                    width=400, callback=_save_item("ds_scandir"))
-                dpg.add_button(label="浏览", callback=lambda: dpg.show_item("ds_folder_dialog"))
+                dpg.add_button(label="浏览", callback=lambda: _browse_scandir())
                 dpg.add_button(label="扫描", callback=lambda: _scan_dataset(state))
                 dpg.add_text("", tag="ds_scan_msg", color=(255, 255, 100))
 
@@ -139,6 +163,24 @@ def create_dataset_tab(state):
         # 第一步：重采样
         with dpg.collapsing_header(label="第一步：重采样到 44.1kHz (resample.py)", default_open=True):
             dpg.add_text("dataset_raw → dataset/44k，自动去静音；未跳过时会逐段 peak normalize。")
+            with dpg.group(horizontal=True):
+                dpg.add_text("输出目录:")
+                dpg.add_input_text(tag="ds_outdir",
+                                   default_value=_saved_value(settings, "ds_outdir", default_out_dir),
+                                   width=400, callback=_save_item("ds_outdir"))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("重采样后的 wav 与提取的特征(.soft.pt/.f0.npy/.spec.pt)都存这里，\n"
+                                 "训练时每步从此读取。项目在机械硬盘时，可改为 SSD 上的绝对路径\n"
+                                 "(如 D:\\ssd\\dataset_44k)以加速训练。所有工程共用此目录，\n"
+                                 "切换工程重新预处理会覆盖。留空=项目内 dataset/44k。")
+                dpg.add_button(label="浏览", callback=lambda: _browse_outdir())
+                dpg.add_button(label="同步filelist", callback=lambda: _sync_filelist(state))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("把当前工程的 train.txt/val.txt 里每行音频路径的目录前缀，\n"
+                                 "替换为上面填的输出目录(保留原有 train/val 划分与说话人)。\n"
+                                 "用于：已手动把数据集挪到新目录、但不想重抽特征时，\n"
+                                 "一键让训练 filelist 指向新位置。\n"
+                                 "前提：新目录里是「输出目录/说话人/*.wav」结构。")
             with dpg.group(horizontal=True):
                 dpg.add_text("目标采样率:")
                 dpg.add_input_int(tag="rs_sr", default_value=_saved_value(settings, "rs_sr", 44100),
@@ -209,7 +251,7 @@ def create_dataset_tab(state):
                     dpg.add_text("含多个说话人子目录的 wav/flac/mp3 语料。\n"
                                  "投影刻画「说话人信息在 WavLM 空间的位置」，与数据集无关，\n"
                                  "建议用尽量多的说话人；用单说话人歌声集拟合是病态的。")
-                dpg.add_button(label="浏览", callback=lambda: dpg.show_item("ds_eta_folder_dialog"))
+                dpg.add_button(label="浏览", callback=lambda: _browse_eta_dir())
                 dpg.add_button(label="拟合投影", callback=lambda: _run_eta_fit(state))
                 dpg.add_text(_eta_proj_status(), tag="ds_eta_msg", color=(255, 255, 100))
 
@@ -265,19 +307,7 @@ def create_dataset_tab(state):
             dpg.add_text("执行日志:")
             dpg.add_button(label="复制全部", callback=lambda: _copy_log(state, "ds"))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "ds", "ds_log", "ds_pipe_msg"))
-        with dpg.child_window(tag="ds_log_win", height=300, border=True, horizontal_scrollbar=True):
-            dpg.add_text(tag="ds_log", default_value="")
-
-    # 文件夹选择对话框
-    with dpg.file_dialog(directory_selector=True, show=False, tag="ds_folder_dialog",
-                         callback=lambda s, d: _choose_dataset_dir(d),
-                         width=700, height=400):
-        dpg.add_file_extension(".*")
-
-    with dpg.file_dialog(directory_selector=True, show=False, tag="ds_eta_folder_dialog",
-                         callback=lambda s, d: _choose_eta_dir(d),
-                         width=700, height=400):
-        dpg.add_file_extension(".*")
+        add_log_panel("ds_log", "ds_log_win", 300)
 
     # 按当前编码器初始化专属区块的可见性
     _refresh_encoder_sections(dpg.get_value("ds_encoder"))
@@ -309,7 +339,7 @@ def _run_resample(state):
     num_proc = dpg.get_value("rs_numproc")
     scan_dir = dpg.get_value("ds_scandir")
     in_dir = scan_dir if os.path.isabs(scan_dir) else os.path.join(backend.ROOT, scan_dir)
-    cmd = backend.resample_cmd(sr, in_dir, backend.DATASET_44K, skip_loudnorm, num_proc)
+    cmd = backend.resample_cmd(sr, in_dir, config.dataset_44k_dir(), skip_loudnorm, num_proc)
     state["jobs"]["ds"].start(cmd)
 
 
@@ -326,7 +356,7 @@ def _run_preconfig(state):
     val_list = os.path.join(config.filelist_dir(proj), "val.txt")
     cfg_out = config.config_path(proj)
     diff_out = config.diff_config_path(proj)
-    cmd = backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out, reuse_config)
+    cmd = backend.config_cmd(encoder, vol_aug, config.dataset_44k_dir(), train_list, val_list, cfg_out, diff_out, reuse_config)
     state["patch_after_ds"] = True
     state["jobs"]["ds"].start(cmd)
 
@@ -356,7 +386,7 @@ def _run_hubert(state):
     use_diff = dpg.get_value("ds_usediff")
     cfg = config.config_path(proj)
     diff_cfg = config.diff_config_path(proj)
-    cmd = backend.hubert_cmd(f0_method, num_proc, use_diff, backend.DATASET_44K, cfg, diff_cfg)
+    cmd = backend.hubert_cmd(f0_method, num_proc, use_diff, config.dataset_44k_dir(), cfg, diff_cfg)
     state["jobs"]["ds"].start(cmd)
 
 
@@ -388,9 +418,9 @@ def _run_all(state):
     diff_out = config.diff_config_path(proj)
 
     steps = [
-        ("重采样", backend.resample_cmd(sr, in_dir, backend.DATASET_44K, skip_loudnorm, rs_num_proc)),
-        ("生成配置", backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out, reuse_config)),
-        ("提取特征+f0", backend.hubert_cmd(f0_method, num_proc, use_diff, backend.DATASET_44K, cfg_out, diff_out)),
+        ("重采样", backend.resample_cmd(sr, in_dir, config.dataset_44k_dir(), skip_loudnorm, rs_num_proc)),
+        ("生成配置", backend.config_cmd(encoder, vol_aug, config.dataset_44k_dir(), train_list, val_list, cfg_out, diff_out, reuse_config)),
+        ("提取特征+f0", backend.hubert_cmd(f0_method, num_proc, use_diff, config.dataset_44k_dir(), cfg_out, diff_out)),
     ]
     state["jobs"]["ds"].start_chain(steps)
 

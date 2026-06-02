@@ -12,7 +12,6 @@ import soundfile as sf
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = os.path.join(ROOT, "venv", "python.exe")
 DATASET_RAW = os.path.join(ROOT, "dataset_raw")
-DATASET_44K = os.path.join(ROOT, "dataset", "44k")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 

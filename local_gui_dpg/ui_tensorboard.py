@@ -3,8 +3,14 @@
 import os
 import webbrowser
 import dearpygui.dearpygui as dpg
-from . import config, backend
-from .ui_log import clear_job_log
+from . import config, backend, ui_dialogs
+from .ui_log import clear_job_log, add_log_panel
+
+
+def _browse_tb_logdir():
+    p = ui_dialogs.pick_directory("选择 TensorBoard 日志目录")
+    if p:
+        dpg.set_value("tb_logdir", p)
 
 
 def create_tensorboard_tab(state):
@@ -18,7 +24,7 @@ def create_tensorboard_tab(state):
             with dpg.group(horizontal=True):
                 dpg.add_text("日志目录:")
                 dpg.add_input_text(tag="tb_logdir", width=500, readonly=True)
-                dpg.add_button(label="浏览", callback=lambda: dpg.show_item("tb_folder_dialog"))
+                dpg.add_button(label="浏览", callback=lambda: _browse_tb_logdir())
 
             with dpg.group(horizontal=True):
                 dpg.add_text("端口:")
@@ -65,14 +71,7 @@ def create_tensorboard_tab(state):
         with dpg.group(horizontal=True):
             dpg.add_button(label="复制全部", callback=lambda: _copy_tb_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "tb", "tb_log", "tb_status"))
-        with dpg.child_window(tag="tb_log_win", height=400, border=True, horizontal_scrollbar=True):
-            dpg.add_text(tag="tb_log", default_value="")
-
-    # 文件夹选择对话框
-    with dpg.file_dialog(directory_selector=True, show=False, tag="tb_folder_dialog",
-                         callback=lambda s, d: dpg.set_value("tb_logdir", d["file_path_name"]),
-                         width=700, height=400):
-        dpg.add_file_extension(".*")
+        add_log_panel("tb_log", "tb_log_win", 400)
 
 
 def _start_tensorboard(state):

@@ -3,8 +3,8 @@
 import os
 import glob
 import dearpygui.dearpygui as dpg
-from . import config, backend
-from .ui_log import clear_job_log
+from . import config, backend, ui_dialogs
+from .ui_log import clear_job_log, add_log_panel
 
 
 INFER_SETTING_KEYS = [
@@ -221,7 +221,7 @@ def create_infer_tab(state):
                     width=400,
                     default_value=_saved_value(settings, "inf_cluster", ""),
                     callback=lambda s=None, a=None, u=None: _save_item("inf_cluster"))
-                dpg.add_button(label="选择", callback=lambda: dpg.show_item("inf_cluster_dialog"))
+                dpg.add_button(label="选择", callback=lambda: _browse_cluster_file())
             with dpg.group(horizontal=True):
                 dpg.add_text("混合比例:")
                 dpg.add_drag_float(
@@ -321,17 +321,7 @@ def create_infer_tab(state):
             dpg.add_text("推理日志:")
             dpg.add_button(label="复制全部", callback=lambda: _copy_infer_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "infer", "inf_log", "out_path"))
-        with dpg.child_window(tag="inf_log_win", height=230, border=True, horizontal_scrollbar=True):
-            dpg.add_text(tag="inf_log", default_value="")
-
-    # 聚类模型文件对话框（保留 DPG 的，因为不常用）
-    with dpg.file_dialog(show=False, tag="inf_cluster_dialog",
-                         callback=lambda s, d: dpg.set_value("inf_cluster", d["file_path_name"]),
-                         width=700, height=400):
-        dpg.add_file_extension(".*")
-        dpg.add_file_extension(".pt", color=(0, 255, 0))
-        dpg.add_file_extension(".pth", color=(0, 255, 0))
-        dpg.add_file_extension(".pkl", color=(0, 255, 0))
+        add_log_panel("inf_log", "inf_log_win", 230)
 
 
 def _refresh_ckpts(state):
@@ -528,24 +518,20 @@ def _set_volume(state):
     dpg.set_value("play_vol_pct", f"{int(vol)}%")
 
 
+def _browse_cluster_file():
+    """选择聚类/检索模型文件"""
+    file_path = ui_dialogs.pick_file(
+        title="选择聚类/检索模型",
+        filetypes=[("模型文件", "*.pt *.pth *.pkl"), ("所有文件", "*.*")])
+    if file_path:
+        dpg.set_value("inf_cluster", file_path)
+
+
 def _browse_input_file(state):
     """使用系统文件对话框选择输入音频"""
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()  # 隐藏主窗口
-    root.attributes('-topmost', True)  # 置顶
-
-    file_path = filedialog.askopenfilename(
+    file_path = ui_dialogs.pick_file(
         title="选择输入音频",
-        filetypes=[
-            ("音频文件", "*.wav *.mp3 *.flac *.ogg *.m4a *.aac"),
-            ("所有文件", "*.*")
-        ]
-    )
-    root.destroy()
-
+        filetypes=[("音频文件", "*.wav *.mp3 *.flac *.ogg *.m4a *.aac"), ("所有文件", "*.*")])
     if file_path:
         # 更新下拉框
         dpg.set_value("inf_input", file_path)

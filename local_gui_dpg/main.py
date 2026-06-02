@@ -5,6 +5,7 @@ import time
 import glob
 import dearpygui.dearpygui as dpg
 from . import config, backend, theme
+from . import ui_log
 from .ui_dataset import create_dataset_tab
 from .ui_train import create_train_tab, _refresh_chart, _plot_chart
 from .ui_infer import create_infer_tab, _refresh_ckpts, _refresh_presets
@@ -157,7 +158,7 @@ def _update_logs(state):
         if job.buf.dirty:
             text = job.buf.snapshot()
             if dpg.does_item_exist(log_tag):
-                dpg.set_value(log_tag, text)
+                ui_log.set_log_text(log_tag, text)
                 pending.add(win_tag)
 
 

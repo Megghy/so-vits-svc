@@ -4,7 +4,7 @@ import os
 import webbrowser
 import dearpygui.dearpygui as dpg
 from . import config, backend
-from .ui_log import clear_job_log
+from .ui_log import clear_job_log, add_log_panel
 
 # 全局 state，供自动保存回调使用
 _global_state = None
@@ -95,24 +95,21 @@ def create_train_tab(state):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "train"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "train", "train_log", "train_msg"))
-                with dpg.child_window(tag="train_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text(tag="train_log", default_value="")
+                add_log_panel("train_log", "train_log_win", 380)
 
             with dpg.tab(label="扩散日志"):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "diff"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "diff", "diff_log", "diff_msg"))
-                with dpg.child_window(tag="diff_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text(tag="diff_log", default_value="")
+                add_log_panel("diff_log", "diff_log_win", 380)
 
             with dpg.tab(label="聚类/检索日志"):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "cluster"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "cluster", "cluster_log", "cluster_msg"))
-                with dpg.child_window(tag="cluster_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_text(tag="cluster_log", default_value="")
+                add_log_panel("cluster_log", "cluster_log_win", 380)
 
             with dpg.tab(label="训练曲线"):
                 with dpg.group(horizontal=True):
@@ -403,7 +400,7 @@ def _start_cluster_train(state):
         return
 
     # 检查是否有 .soft.pt 特征文件
-    dataset_dir = backend.DATASET_44K
+    dataset_dir = config.dataset_44k_dir()
     has_features = False
     for spk_dir in os.listdir(dataset_dir):
         spk_path = os.path.join(dataset_dir, spk_dir)
@@ -438,7 +435,7 @@ def _start_index_train(state):
         dpg.set_value("cluster_msg", "配置不存在，先完成预处理。")
         return
 
-    dataset_dir = backend.DATASET_44K
+    dataset_dir = config.dataset_44k_dir()
     output_dir = config.log_dir(proj)
 
     cmd = backend.index_train_cmd(dataset_dir, cfg_path, output_dir)

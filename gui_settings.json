@@ -5,7 +5,7 @@
   "chart_auto": false,
   "chart_log": false,
   "infer": {
-    "inf_ckpt": "G_500.pth",
+    "inf_ckpt": "",
     "inf_spk": "kina",
     "inf_diff_model": "",
     "inf_input": "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_isolated_44k_stereo.wav",

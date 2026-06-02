@@ -531,6 +531,7 @@ class SynthesizerTrn(nn.Module):
                 model_name=kwargs.get("bigvgan_model", "nvidia/bigvgan_v2_44khz_128band_512x"),
                 trainable=kwargs.get("bigvgan_trainable", False),
                 use_cuda_kernel=kwargs.get("bigvgan_cuda_kernel", False),
+                gin_channels=gin_channels,
             )
         else:
             print("[?] Unkown vocoder: use default(nsf-hifigan)")
@@ -606,8 +607,11 @@ class SynthesizerTrn(nn.Module):
 
         # nsf decoder
         o = self.dec(z_slice, g=g, f0=pitch_slice)
+        pred_mel = None
+        if isinstance(o, tuple):
+            o, pred_mel = o
 
-        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits
+        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits, pred_mel
 
     @torch.no_grad()
     def infer(self, c, f0, uv, g=None, noice_scale=0.35, seed=52468, predict_f0=False, vol = None):
@@ -649,4 +653,6 @@ class SynthesizerTrn(nn.Module):
         z_p, m_p, logs_p, c_mask = self.enc_p(x, x_mask, f0=f0_to_coarse(f0), noice_scale=noice_scale)
         z = self.flow(z_p, c_mask, g=g, reverse=True)
         o = self.dec(z * c_mask, g=g, f0=f0)
+        if isinstance(o, tuple):
+            o = o[0]
         return o,f0

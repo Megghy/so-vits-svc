@@ -209,7 +209,7 @@ def build_discriminator(hps_model, hps_data):
         discs.append(MultiResolutionDiscriminator({}))
     if "mbd" in kinds:
         discs.append(MultiBandDiscriminator({}))
-    return CombinedDiscriminator(discs)
+    return CombinedDiscriminator(discs, kinds=kinds)
 
 
 def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, writers):
@@ -225,6 +225,21 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
     warmup_steps = hps.train.warmup_epochs * len(train_loader)
     decay_steps = getattr(hps.train, "lr_decay_steps", 100000)
     c_speaker_adv = getattr(hps.train, "c_speaker_adv", 0.0)
+    disc_start_step = getattr(hps.train, "disc_start_step", 10000)
+    c_bigvgan_mel = getattr(hps.train, "c_bigvgan_mel", 45.0)
+    is_combined_disc = hasattr(net_d, "kinds")
+
+    # BigVGAN 两段式监督用的 mel:必须用官方权重的 mel 定义(128band/n_fft2048/hop512/
+    # win2048/sr44100/fmin0/fmax=None),与 hps.data 的 80-band 配置无关,否则又制造分布错位。
+    bigvgan_mel_spectrogram = None
+    if getattr(hps.model, "vocoder_name", "") in ("bigvgan", "bigvgan-v2"):
+        from functools import partial
+        from bigvgan.meldataset import mel_spectrogram as _bv_mel
+        bigvgan_mel_spectrogram = partial(
+            _bv_mel, n_fft=2048,
+            num_mels=getattr(hps.model, "bigvgan_mel_channels", 128),
+            sampling_rate=44100, hop_size=512, win_size=2048, fmin=0, fmax=None,
+        )
 
     # train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -254,9 +269,20 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
             hps.data.mel_fmin,
             hps.data.mel_fmax)
         
+        # 判别器自动开关:disc_start_step 前只用 MPD,之后接入 CQT/MRD/MBD,
+        # 给随机初始化的 bigvgan mel head 一段不被多判别器对抗梯度干扰的对齐窗口。
+        if is_combined_disc:
+            if global_step >= disc_start_step:
+                active = set(net_d.kinds)
+            else:
+                active = {"mpd"}
+            disc_kwargs = {"active": active}
+        else:
+            disc_kwargs = {}
+
         with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
             y_hat, ids_slice, z_mask, \
-            (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
+            (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits, pred_mel = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
                                                                                                     spec_lengths=lengths,vol = volume)
 
             y_mel = commons.slice_segments(mel, ids_slice, hps.train.segment_size // hps.data.hop_length)
@@ -273,7 +299,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
             y = commons.slice_segments(y, ids_slice * hps.data.hop_length, hps.train.segment_size)  # slice
 
             # Discriminator
-            y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
+            y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach(), **disc_kwargs)
 
             with autocast('cuda', enabled=False, dtype=half_type):
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
@@ -288,7 +314,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
 
         with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
             # Generator
-            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
+            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat, **disc_kwargs)
             with autocast('cuda', enabled=False, dtype=half_type):
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
@@ -296,7 +322,12 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
                 loss_lf0 = F.mse_loss(pred_lf0, lf0) if getattr(net_g, "module", net_g).use_automatic_f0_prediction else 0
                 loss_speaker_adv = F.cross_entropy(speaker_adv_logits, g.squeeze(1)) * c_speaker_adv if speaker_adv_logits is not None else 0
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0 + loss_speaker_adv
+                # BigVGAN 两段式:直接监督 mel head 输出对齐 vocoder 输入流形(治噪音的核心)
+                loss_bigvgan_mel = 0
+                if pred_mel is not None:
+                    target_mel = bigvgan_mel_spectrogram(y.squeeze(1).float())
+                    loss_bigvgan_mel = F.l1_loss(pred_mel.float(), target_mel) * c_bigvgan_mel
+                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0 + loss_speaker_adv + loss_bigvgan_mel
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -322,7 +353,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                     scalar_dict.update({"grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g})
                 scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/mel_raw": mel_raw,
                                     "loss/g/kl": loss_kl, "loss/g/lf0": loss_lf0, "loss/g/speaker_adv": loss_speaker_adv,
-                                    "loss/g/reference": reference_loss})
+                                    "loss/g/bigvgan_mel": loss_bigvgan_mel, "loss/g/reference": reference_loss})
 
                 # scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
                 # scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})

@@ -102,9 +102,10 @@ class ExperimentalUpgradeTests(unittest.TestCase):
             )
             z = torch.randn(2, 192, 7)
 
-            audio = decoder(z, g=torch.randn(2, 768, 7), f0=torch.randn(2, 7))
+            audio, pred_mel = decoder(z, g=torch.randn(2, 768, 7), f0=torch.randn(2, 7))
 
             self.assertEqual((2, 1, 3584), tuple(audio.shape))
+            self.assertEqual((2, 100, 7), tuple(pred_mel.shape))
             self.assertFalse(any(p.requires_grad for p in decoder.vocoder.parameters()))
             self.assertTrue(decoder.vocoder.removed_weight_norm)
             self.assertEqual("nvidia/bigvgan_v2_44khz_128band_512x", decoder.vocoder.model_name)

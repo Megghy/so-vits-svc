@@ -320,15 +320,22 @@ class MultiBandDiscriminator(nn.Module):
 
 class CombinedDiscriminator(nn.Module):
     """Chains multiple discriminators, concatenating their outputs into the
-    flat 4-list interface that the training loop and losses expect."""
+    flat 4-list interface that the training loop and losses expect.
 
-    def __init__(self, discriminators: List[nn.Module]):
+    kinds 与 discriminators 一一对应(如 ["mpd","cqt","mrd"]);forward 的 active
+    传一个 kind 集合时只跑其中的子判别器,用于训练早期只启用 MPD、按 step 再接入
+    CQT/MRD,避免随机初始化的 mel head 阶段被多判别器对抗梯度带偏。"""
+
+    def __init__(self, discriminators: List[nn.Module], kinds: List[str] = None):
         super().__init__()
         self.discriminators = nn.ModuleList(discriminators)
+        self.kinds = kinds if kinds is not None else [None] * len(discriminators)
 
-    def forward(self, y, y_hat):
+    def forward(self, y, y_hat, active=None):
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
-        for disc in self.discriminators:
+        for kind, disc in zip(self.kinds, self.discriminators):
+            if active is not None and kind not in active:
+                continue
             y_d_r, y_d_g, fmap_r, fmap_g = disc(y, y_hat)
             y_d_rs.extend(y_d_r)
             y_d_gs.extend(y_d_g)

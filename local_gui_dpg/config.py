@@ -68,12 +68,17 @@ CONFIG_FIELDS = [
      "生成端声码器。\n"
      "· nsf-hifigan：默认，稳定、显存开销低。\n"
      "· nsf-snake-hifigan：周期激活增强。\n"
-     "· bigvgan-v2：实验项，先把 VITS latent 投影为 BigVGAN mel，再用 BigVGAN 生成波形。\n"
-     "  建议 hop_length=512、44.1k，需安装 bigvgan>=2.4.1。改动结构，需重新训练。"),
+     "· bigvgan-v2：先用 mel head 把 VITS latent(含f0)解码为 BigVGAN 128-band mel\n"
+     "  并直接监督对齐，再用冻结的官方 BigVGAN 生成波形。需 hop_length=512、44.1k，\n"
+     "  需安装 bigvgan>=2.4.1。改动结构，需重新训练。"),
     ("model.bigvgan_model", "BigVGAN模型名", "str", "nvidia/bigvgan_v2_44khz_128band_512x", None,
      "vocoder_name=bigvgan-v2 时使用的 BigVGAN checkpoint。默认匹配 44.1k / 512x。"),
     ("model.bigvgan_mel_channels", "BigVGAN mel通道", "int", 128, (80, 128),
      "BigVGAN 输入 mel 通道数。默认 128，对应 nvidia/bigvgan_v2_44khz_128band_512x。"),
+    ("train.c_bigvgan_mel", "BigVGAN mel监督权重", "float", 45.0, (0.0, 100.0),
+     "BigVGAN 两段式：mel head 输出与 BigVGAN 自带 mel 定义生成的目标做 L1 的权重。\n"
+     "这是治噪音的核心监督项，让 mel head 先对齐到 vocoder 的输入流形。\n"
+     "建议保持 45 左右，过小则 mel 对齐慢、噪音持续。仅 bigvgan-v2 生效。"),
     ("model.bigvgan_trainable", "微调 BigVGAN", "bool", False, None,
      "是否训练 BigVGAN 本体。关闭时只训练 latent→mel 投影，显存更省；开启可提升适配但更容易不稳定。"),
     ("model.bigvgan_cuda_kernel", "BigVGAN CUDA kernel", "bool", False, None,
@@ -94,6 +99,11 @@ CONFIG_FIELDS = [
      "将频谱切成多个子带分别判别，进一步细化频谱。\n"
      "训练开销较大，显存紧张时可不开。\n"
      "仅训练期生效，需重新训练。"),
+    ("train.disc_start_step", "附加判别器启用step", "int", 10000, (0, 200000),
+     "BigVGAN 两段式专用：前 N 步只用 MPD 判别器，到达该 step 才接入 CQT/MRD/MBD。\n"
+     "给随机初始化的 mel head 一段不被多判别器对抗梯度干扰的对齐窗口，避免早期发散。\n"
+     "0=从头就全开。建议 5000~20000，看 TensorBoard 的 loss/g/bigvgan_mel 压平后再开。\n"
+     "续训按 global_step 自动接续，无需手动切换。"),
     # ===== 数据增强 =====
     ("train.vol_aug", "音量增强", "bool", False, None,
      "训练时随机调整音量并重算频谱，增强对响度变化的鲁棒性。\n仅作用于训练集。"),
@@ -173,9 +183,9 @@ CONFIG_GROUPS = [
                   "train.fp16_run", "train.half_type", "train.all_in_mem", "train.num_workers"], True),
     ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path",
                     "model.vocoder_name", "model.bigvgan_model", "model.bigvgan_mel_channels",
-                    "model.bigvgan_trainable", "model.bigvgan_cuda_kernel"], True),
+                    "train.c_bigvgan_mel", "model.bigvgan_trainable", "model.bigvgan_cuda_kernel"], True),
     ("判别器增强 (BigVGAN-v2，仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
-                                          "model.use_mbd_disc"], True),
+                                          "model.use_mbd_disc", "train.disc_start_step"], True),
     ("数据增强", ["train.vol_aug", "train.feature_aug", "train.feature_aug_noise",
                   "train.feature_aug_time_mask", "train.feature_aug_channel_dropout"], True),
     ("高级模型结构 (不常用，改后需重训)", ["model.use_speaker_adversarial", "model.speaker_adversarial_weight",

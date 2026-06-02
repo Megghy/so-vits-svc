@@ -20,6 +20,8 @@
     "c_mel": 45,
     "c_kl": 1.0,
     "c_speaker_adv": 0.1,
+    "c_bigvgan_mel": 45.0,
+    "disc_start_step": 10000,
     "use_sr": true,
     "max_speclen": 512,
     "port": "8001",

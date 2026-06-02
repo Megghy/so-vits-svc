@@ -20,6 +20,7 @@ DATASET_SETTING_KEYS = (
     "ds_encoder",
     "ds_volaug",
     "ds_reuse_config",
+    "ds_eta_dir",
     "ds_f0method",
     "ds_numproc",
     "ds_usediff",
@@ -55,6 +56,55 @@ def _choose_dataset_dir(data):
     path = data["file_path_name"]
     dpg.set_value("ds_scandir", path)
     _save_dataset_setting("ds_scandir", path)
+
+
+def _choose_eta_dir(data):
+    path = data["file_path_name"]
+    dpg.set_value("ds_eta_dir", path)
+    _save_dataset_setting("ds_eta_dir", path)
+
+
+def _eta_proj_path():
+    return os.path.join(backend.ROOT, "pretrain", "eta_wavlm_proj.pt")
+
+
+def _eta_proj_status():
+    return "投影已存在" if os.path.exists(_eta_proj_path()) else "尚未拟合投影"
+
+
+def _whisper_path():
+    for name in ("large-v3.pt", "large-v2.pt"):
+        p = os.path.join(backend.ROOT, "pretrain", name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _whisper_status():
+    p = _whisper_path()
+    return f"已就位 ({os.path.basename(p)})" if p else "缺 large-v3.pt"
+
+
+def _refresh_encoder_sections(enc):
+    """按所选编码器显示/隐藏其专属区块。"""
+    if dpg.does_item_exist("ds_eta_section"):
+        dpg.configure_item("ds_eta_section", show=(enc == "etawavlmlarge"))
+    if dpg.does_item_exist("ds_whisper_section"):
+        dpg.configure_item("ds_whisper_section", show=(enc == "whisper+contentvec"))
+
+
+def _on_encoder_change(sender=None, app_data=None, user_data=None):
+    enc = dpg.get_value("ds_encoder")
+    _save_dataset_setting("ds_encoder", enc)
+    _refresh_encoder_sections(enc)
+
+
+def _run_whisper_download(state):
+    if _whisper_path() and os.path.basename(_whisper_path()) == "large-v3.pt":
+        dpg.set_value("ds_whisper_msg", "large-v3.pt 已存在")
+        return
+    dpg.set_value("ds_whisper_msg", "下载中…(见日志)")
+    state["jobs"]["ds"].start(backend.whisper_download_cmd())
 
 
 def create_dataset_tab(state):
@@ -116,12 +166,14 @@ def create_dataset_tab(state):
                 dpg.add_text("内容编码器:")
                 dpg.add_combo(config.SPEECH_ENCODERS, tag="ds_encoder",
                               default_value=_saved_value(settings, "ds_encoder", "vec768l12"),
-                              width=150, callback=_save_item("ds_encoder"))
+                              width=150, callback=_on_encoder_change)
                 with dpg.tooltip(dpg.last_item()):
                     dpg.add_text("内容特征提取器，须与训练页保持一致。\n"
                                  "· vec768l12：默认，唱歌综合最优(ssl_dim=768)\n"
                                  "· wavlmlarge：WavLM-Large 第6层，解耦更强、咬字更准\n"
                                  "  (ssl_dim 自动设为 1024，需放置 pretrain/WavLM-Large.pt)\n"
+                                 "· whisper+contentvec：双编码器(ssl_dim=2048)，质量上限最高、单说话人推荐\n"
+                                 "  需 pretrain/large-v3.pt(python download_whisper.py)，预处理较慢\n"
                                  "· cnhubertlarge/whisper-ppg：偏说话场景\n"
                                  "切换编码器后必须重新提取特征并重训。")
                 dpg.add_checkbox(label="音量增强(vol_aug)", tag="ds_volaug",
@@ -138,6 +190,39 @@ def create_dataset_tab(state):
                                  "batch_size/学习率/判别器/增强等超参，无需重新设置。\n"
                                  "首次生成或文件不存在时此项无影响。")
                 dpg.add_button(label="生成配置", callback=lambda: _run_preconfig(state))
+
+        dpg.add_spacer(height=10)
+
+        # 可选：拟合 Eta-WavLM 去说话人投影（仅 etawavlmlarge 需要，按编码器条件显示）
+        with dpg.collapsing_header(label="拟合 Eta-WavLM 去说话人投影 (eta_wavlm_fit.py)",
+                                   tag="ds_eta_section", default_open=True, show=False):
+            dpg.add_text("仅当内容编码器选 etawavlmlarge 时需要。在多说话人语料上拟合一次，\n"
+                         "生成 pretrain/eta_wavlm_proj.pt（全局复用、跨工程共享），\n"
+                         "必须在「第三步：提取特征」之前完成，否则提取会因缺投影而报错。",
+                         color=(150, 150, 150))
+            with dpg.group(horizontal=True):
+                dpg.add_text("多说话人语料目录:")
+                dpg.add_input_text(tag="ds_eta_dir",
+                                   default_value=_saved_value(settings, "ds_eta_dir", default_scan_dir),
+                                   width=360, callback=_save_item("ds_eta_dir"))
+                with dpg.tooltip(dpg.last_item()):
+                    dpg.add_text("含多个说话人子目录的 wav/flac/mp3 语料。\n"
+                                 "投影刻画「说话人信息在 WavLM 空间的位置」，与数据集无关，\n"
+                                 "建议用尽量多的说话人；用单说话人歌声集拟合是病态的。")
+                dpg.add_button(label="浏览", callback=lambda: dpg.show_item("ds_eta_folder_dialog"))
+                dpg.add_button(label="拟合投影", callback=lambda: _run_eta_fit(state))
+                dpg.add_text(_eta_proj_status(), tag="ds_eta_msg", color=(255, 255, 100))
+
+        dpg.add_spacer(height=10)
+
+        # Whisper 权重（仅 whisper+contentvec 需要，按编码器条件显示）
+        with dpg.collapsing_header(label="下载 Whisper 权重 (whisper+contentvec 所需)",
+                                   tag="ds_whisper_section", default_open=True, show=False):
+            dpg.add_text("whisper+contentvec 需要 pretrain/large-v3.pt(~3GB)，组合编码器的 Whisper 分支用它。",
+                         color=(150, 150, 150))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="下载 large-v3", callback=lambda: _run_whisper_download(state))
+                dpg.add_text(_whisper_status(), tag="ds_whisper_msg", color=(255, 255, 100))
 
         dpg.add_spacer(height=10)
 
@@ -181,13 +266,21 @@ def create_dataset_tab(state):
             dpg.add_button(label="复制全部", callback=lambda: _copy_log(state, "ds"))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "ds", "ds_log", "ds_pipe_msg"))
         with dpg.child_window(tag="ds_log_win", height=300, border=True, horizontal_scrollbar=True):
-            dpg.add_input_text(tag="ds_log", multiline=True, readonly=True, width=-1, height=18)
+            dpg.add_text(tag="ds_log", default_value="")
 
     # 文件夹选择对话框
     with dpg.file_dialog(directory_selector=True, show=False, tag="ds_folder_dialog",
                          callback=lambda s, d: _choose_dataset_dir(d),
                          width=700, height=400):
         dpg.add_file_extension(".*")
+
+    with dpg.file_dialog(directory_selector=True, show=False, tag="ds_eta_folder_dialog",
+                         callback=lambda s, d: _choose_eta_dir(d),
+                         width=700, height=400):
+        dpg.add_file_extension(".*")
+
+    # 按当前编码器初始化专属区块的可见性
+    _refresh_encoder_sections(dpg.get_value("ds_encoder"))
 
 
 def _scan_dataset(state):
@@ -236,6 +329,20 @@ def _run_preconfig(state):
     cmd = backend.config_cmd(encoder, vol_aug, backend.DATASET_44K, train_list, val_list, cfg_out, diff_out, reuse_config)
     state["patch_after_ds"] = True
     state["jobs"]["ds"].start(cmd)
+
+
+def _run_eta_fit(state):
+    eta_dir = dpg.get_value("ds_eta_dir")
+    if not eta_dir:
+        dpg.set_value("ds_eta_msg", "请先填多说话人语料目录。")
+        return
+    _save_all_dataset_settings()
+    in_dir = eta_dir if os.path.isabs(eta_dir) else os.path.join(backend.ROOT, eta_dir)
+    if not os.path.isdir(in_dir):
+        dpg.set_value("ds_eta_msg", "目录不存在。")
+        return
+    dpg.set_value("ds_eta_msg", "拟合中…")
+    state["jobs"]["ds"].start(backend.eta_fit_cmd(in_dir))
 
 
 def _run_hubert(state):

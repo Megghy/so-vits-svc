@@ -267,11 +267,7 @@ class Svc(object):
               second_encoding = False,
               loudness_envelope_adjustment = 1
               ):
-        torchaudio.set_audio_backend("soundfile")
-        wav, sr = torchaudio.load(raw_path)
-        if not hasattr(self,"audio_resample_transform") or self.audio16k_resample_transform.orig_freq != sr:
-            self.audio_resample_transform = torchaudio.transforms.Resample(sr,self.target_sample)
-        wav = self.audio_resample_transform(wav).numpy()[0]
+        wav, sr = librosa.load(raw_path, sr=self.target_sample, mono=True)
         if spk_mix:
             c, f0, uv = self.get_unit_f0(wav, tran, 0, None, f0_filter,f0_predictor,cr_threshold=cr_threshold)
             n_frames = f0.size(1)
@@ -511,8 +507,7 @@ class RealTimeVC:
                 f0_filter=False):
 
         import maad
-        audio, sr = torchaudio.load(input_wav_path)
-        audio = audio.cpu().numpy()[0]
+        audio, sr = librosa.load(input_wav_path, sr=None, mono=True)
         temp_wav = io.BytesIO()
         if self.last_chunk is None:
             input_wav_path.seek(0)

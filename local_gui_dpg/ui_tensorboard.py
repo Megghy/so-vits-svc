@@ -66,7 +66,7 @@ def create_tensorboard_tab(state):
             dpg.add_button(label="复制全部", callback=lambda: _copy_tb_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "tb", "tb_log", "tb_status"))
         with dpg.child_window(tag="tb_log_win", height=400, border=True, horizontal_scrollbar=True):
-            dpg.add_input_text(tag="tb_log", multiline=True, readonly=True, width=-1, height=18)
+            dpg.add_text(tag="tb_log", default_value="")
 
     # 文件夹选择对话框
     with dpg.file_dialog(directory_selector=True, show=False, tag="tb_folder_dialog",

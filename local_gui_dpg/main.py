@@ -142,15 +142,6 @@ def _refresh_project_ui(state):
     _refresh_chart(state)
 
 
-def _log_line_height(state):
-    lh = state.get("_log_line_h")
-    if not lh:
-        sz = dpg.get_text_size("Ag")
-        lh = sz[1] if sz else 14
-        state["_log_line_h"] = lh
-    return lh
-
-
 def _update_logs(state):
     """定时刷新所有日志窗口"""
     pending = state.setdefault("pending_log_scroll", set())
@@ -167,8 +158,6 @@ def _update_logs(state):
             text = job.buf.snapshot()
             if dpg.does_item_exist(log_tag):
                 dpg.set_value(log_tag, text)
-                lines = text.count("\n") + 1
-                dpg.configure_item(log_tag, height=int(lines * _log_line_height(state)) + 8)
                 pending.add(win_tag)
 
 

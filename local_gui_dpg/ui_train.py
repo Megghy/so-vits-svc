@@ -96,7 +96,7 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "train", "train_log", "train_msg"))
                 with dpg.child_window(tag="train_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_input_text(tag="train_log", multiline=True, readonly=True, width=-1, height=18)
+                    dpg.add_text(tag="train_log", default_value="")
 
             with dpg.tab(label="扩散日志"):
                 with dpg.group(horizontal=True):
@@ -104,7 +104,7 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "diff", "diff_log", "diff_msg"))
                 with dpg.child_window(tag="diff_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_input_text(tag="diff_log", multiline=True, readonly=True, width=-1, height=18)
+                    dpg.add_text(tag="diff_log", default_value="")
 
             with dpg.tab(label="聚类/检索日志"):
                 with dpg.group(horizontal=True):
@@ -112,7 +112,7 @@ def create_train_tab(state):
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "cluster", "cluster_log", "cluster_msg"))
                 with dpg.child_window(tag="cluster_log_win", height=380, border=True, horizontal_scrollbar=True):
-                    dpg.add_input_text(tag="cluster_log", multiline=True, readonly=True, width=-1, height=18)
+                    dpg.add_text(tag="cluster_log", default_value="")
 
             with dpg.tab(label="训练曲线"):
                 with dpg.group(horizontal=True):

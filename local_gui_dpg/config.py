@@ -17,7 +17,7 @@ for d in (PROJECT_DIR, PRESET_DIR):
 
 SPEECH_ENCODERS = ["vec768l12", "vec256l9", "hubertsoft", "whisper-ppg",
                    "cnhubertlarge", "dphubert", "whisper-ppg-large", "wavlmbase+", "wavlmlarge",
-                   "etawavlmlarge"]
+                   "etawavlmlarge", "whisper+contentvec"]
 F0_METHODS = ["rmvpe", "fcpe", "crepe", "pm", "dio", "harvest"]
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac")
 
@@ -50,6 +50,9 @@ CONFIG_FIELDS = [
      "· wavlmlarge：WavLM-Large(取第6层)，解耦更强、咬字更准，ssl_dim需改为1024\n"
      "· etawavlmlarge：在 wavlmlarge 上做 Eta-WavLM 线性去说话人(ssl_dim=1024)，\n"
      "  音色泄漏更低。需先 `python eta_wavlm_fit.py --in_dir <多说话人wav目录>` 拟合投影\n"
+     "· whisper+contentvec：双编码器(ssl_dim=2048)。Whisper-PPG-Large 强解耦语言内容\n"
+     "  + ContentVec(L6/L9/L12 三层可学习加权)保留韵律，质量上限最高、单说话人推荐。\n"
+     "  需放置 pretrain/large-v3.pt(`python download_whisper.py`)，预处理较慢、特征体积约 3.7×\n"
      "· cnhubertlarge/whisper-ppg：偏说话\n"
      "切换后必须重新预处理(重抽特征)并重训。"),
     # ===== 判别器增强（BigVGAN-v2，仅影响训练，不改推理）=====
@@ -118,12 +121,8 @@ CONFIG_FIELDS = [
      "权重衰减(L2正则)。AdamW 默认 0.01；\n"
      "Lion 通常用更大值(如 0.1~0.5)。0=关闭。"),
     ("train.warmup_epochs", "warmup epochs", "int", 0, (0, 50),
-     "学习率预热轮数，按 step 换算(warmup_epochs × 每epoch步数)线性升到设定学习率。\n0=不预热。"),
-    ("train.cosine_total_steps", "余弦退火总步数", "int", 40000, (1000, 500000),
-     "学习率调度：warmup 之后余弦衰减，到该 step 降到底(learning_rate × 下方比例)，之后保持。\n"
-     "设为你计划训练的总 step 数。训得更久就调大，否则 lr 会提前触底、几乎不更新。"),
-    ("train.cosine_eta_min_ratio", "余弦最小lr比例", "float", 0.02, (0.0, 1.0),
-     "余弦退火终点的学习率 = learning_rate × 此比例。\n默认 0.02(即降到 2%)。"),
+     "学习率预热轮数，按 step 换算(warmup_epochs × 每epoch步数)线性升到设定学习率。\n"
+     "预热结束后 lr 恒定不衰减(无状态、续训一致)。0=不预热。"),
     ("train.c_mel", "梅尔损失权重(c_mel)", "int", 45, (1, 100),
      "重建梅尔频谱损失权重，默认 45。调大更重视音质细节。"),
     ("train.c_kl", "KL损失权重(c_kl)", "float", 1.0, (0.1, 5.0),
@@ -147,7 +146,6 @@ CONFIG_GROUPS = [
                                           "model.n_layers_trans_flow", "model.use_depthwise_conv",
                                           "model.use_automatic_f0_prediction", "model.speaker_embedding"], False),
     ("高级训练超参 (不常用)", ["train.optimizer", "train.weight_decay", "train.warmup_epochs",
-                              "train.cosine_total_steps", "train.cosine_eta_min_ratio",
                               "train.c_mel", "train.c_kl", "train.seed"], False),
 ]
 
@@ -160,6 +158,7 @@ ENCODER_DIM = {
     "vec256l9": 256, "hubertsoft": 256,
     "whisper-ppg": 1024, "cnhubertlarge": 1024, "wavlmlarge": 1024, "etawavlmlarge": 1024,
     "whisper-ppg-large": 1280,
+    "whisper+contentvec": 2048,
 }
 
 
@@ -207,11 +206,6 @@ def check_config(cfg):
         out.append(("warn", "feature_aug=true 但 噪声/时间掩码/通道dropout 三个强度全为 0，增强无任何效果。"))
     elif not t.get("feature_aug") and any(augs):
         out.append(("info", "设置了 feature_aug 强度但 feature_aug=false，当前未启用。"))
-
-    # 余弦退火总步数
-    cts = t.get("cosine_total_steps", 40000)
-    if cts < 5000:
-        out.append(("warn", f"cosine_total_steps={cts} 偏小，lr 会很快退火触底；确认这是计划的总训练步数。"))
 
     # warmup
     if t.get("warmup_epochs", 0) == 0:

@@ -110,10 +110,9 @@ class VitsSvc(object):
 
 
     def get_unit_pitch(self, in_path, tran):
-        source, sr = torchaudio.load(in_path)
+        wav, sr = librosa.load(in_path, sr=None, mono=True)
+        source = torch.from_numpy(wav).unsqueeze(0)
         source = torchaudio.functional.resample(source, sr, 16000)
-        if len(source.shape) == 2 and source.shape[1] >= 2:
-            source = torch.mean(source, dim=0).unsqueeze(0)
         soft = self.get_units(source, sr).squeeze(0).cpu().numpy()
         f0_coarse, f0 = get_f0(source.cpu().numpy()[0], soft.shape[0]*2, tran)
         return soft, f0

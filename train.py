@@ -1,5 +1,4 @@
 import logging
-import math
 import multiprocessing
 import os
 import time
@@ -34,13 +33,12 @@ start_time = time.time()
 # os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'INFO'
 
 
-def cosine_warmup_lr(step, base_lr, warmup_steps, total_steps, eta_min_ratio):
-    """按 step 的 warmup + 余弦退火：前 warmup_steps 线性升到 base_lr，
-    之后余弦衰减到 base_lr*eta_min_ratio，到 total_steps 触底后保持。"""
+def warmup_lr(step, base_lr, warmup_steps):
+    """前 warmup_steps 线性升到 base_lr，之后恒定 base_lr。
+    无衰减、无状态——续训天然一致，不依赖预先设定的总步数。"""
     if warmup_steps > 0 and step < warmup_steps:
         return base_lr * (step + 1) / warmup_steps
-    progress = min((step - warmup_steps) / max(1, total_steps - warmup_steps), 1.0)
-    return base_lr * (eta_min_ratio + (1 - eta_min_ratio) * 0.5 * (1 + math.cos(math.pi * progress)))
+    return base_lr
 
 
 def ensure_base_models(model_dir, speech_encoder):
@@ -190,8 +188,6 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
 
     base_lr = hps.train.learning_rate
     warmup_steps = hps.train.warmup_epochs * len(train_loader)
-    total_steps = getattr(hps.train, "cosine_total_steps", 40000)
-    eta_min_ratio = getattr(hps.train, "cosine_eta_min_ratio", 0.02)
 
     # train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -199,7 +195,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
     net_g.train()
     net_d.train()
     for batch_idx, items in enumerate(train_loader):
-        cur_lr = cosine_warmup_lr(global_step, base_lr, warmup_steps, total_steps, eta_min_ratio)
+        cur_lr = warmup_lr(global_step, base_lr, warmup_steps)
         for pg in optim_g.param_groups:
             pg['lr'] = cur_lr
         for pg in optim_d.param_groups:

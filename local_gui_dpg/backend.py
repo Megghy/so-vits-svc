@@ -250,6 +250,18 @@ def config_cmd(encoder, vol_aug, source_dir, train_list, val_list, config_out, d
     return cmd
 
 
+def eta_fit_cmd(in_dir, out_path=None, output_layer=6):
+    out_path = out_path or os.path.join(ROOT, "pretrain", "eta_wavlm_proj.pt")
+    return _py("eta_wavlm_fit.py") + [
+        "--in_dir", _rel(in_dir),
+        "--out", _rel(out_path),
+        "--output_layer", str(int(output_layer))]
+
+
+def whisper_download_cmd(model="large-v3"):
+    return _py("download_whisper.py") + ["--model", model]
+
+
 def hubert_cmd(f0_method, num_proc, use_diff, in_dir, config_path, diff_config_path):
     cmd = _py("preprocess_hubert_f0.py") + [
         "--in_dir", _rel(in_dir),

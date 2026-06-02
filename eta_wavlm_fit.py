@@ -48,19 +48,27 @@ def main():
     hidden_dim = content.hidden_dim
     spk_dim = spk.dim
 
-    files = glob(os.path.join(args.in_dir, "**", "*.wav"), recursive=True)
+    files = []
+    for ext in (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"):
+        files += glob(os.path.join(args.in_dir, "**", f"*{ext}"), recursive=True)
     files.sort()
     if args.max_files:
         files = files[:args.max_files]
     if not files:
-        raise SystemExit(f"No .wav found under {args.in_dir}")
+        raise SystemExit(f"No audio found under {args.in_dir}")
     print(f"Fitting Eta-WavLM proj on {len(files)} files | hidden={hidden_dim} spk={spk_dim}")
 
     G = torch.zeros(spk_dim + 1, spk_dim + 1, dtype=torch.float64)
     H = torch.zeros(spk_dim + 1, hidden_dim, dtype=torch.float64)
     used = 0
+    skipped = 0
     for f in tqdm(files):
-        wav, _ = librosa.load(f, sr=16000)
+        try:
+            wav, _ = librosa.load(f, sr=16000)
+        except Exception as e:
+            skipped += 1
+            tqdm.write(f"[skip] {f}: {e}")
+            continue
         if wav.size < 1600:  # < 0.1s
             continue
         wt = torch.from_numpy(wav).to(device)
@@ -87,7 +95,7 @@ def main():
         "spk_dim": spk_dim,
         "n_files": used,
     }, args.out)
-    print(f"Saved {args.out} | W{tuple(W.shape)} | files used {used}")
+    print(f"Saved {args.out} | W{tuple(W.shape)} | files used {used} | skipped {skipped}")
 
 
 if __name__ == "__main__":

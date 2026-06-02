@@ -336,6 +336,39 @@ class F0Decoder(nn.Module):
         return x
 
 
+class ContentMerge(nn.Module):
+    """合并 whisper+contentvec 组合编码器的预存特征。
+
+    输入 c:[B, whisper_dim + cv_dim*cv_layers, T](通道顺序见 vencoder/WhisperContentVec.py)。
+    Whisper 分量直通,ContentVec 多层做 softmax 可学习加权后合成单层,拼回 [B, whisper_dim+cv_dim, T]。
+    加权初始为均匀(权重置零),训练中自行学出各层最优配比。
+    两个分支各过一层 LayerNorm:Whisper PPG 与 ContentVec 数值尺度不同,归一化后再拼接更利于训练稳定收敛。
+    """
+
+    def __init__(self, whisper_dim=1280, cv_dim=768, cv_layers=3):
+        super().__init__()
+        self.whisper_dim = whisper_dim
+        self.cv_dim = cv_dim
+        self.cv_layers = cv_layers
+        self.cv_layer_w = nn.Parameter(torch.zeros(cv_layers))
+        self.w_norm = nn.LayerNorm(whisper_dim)
+        self.cv_norm = nn.LayerNorm(cv_dim)
+
+    @staticmethod
+    def _norm(x, ln):
+        return ln(x.transpose(1, 2)).transpose(1, 2)
+
+    def forward(self, c):
+        w_feat = self._norm(c[:, :self.whisper_dim], self.w_norm)
+        cv = c[:, self.whisper_dim:]
+        b, _, t = cv.shape
+        cv = cv.view(b, self.cv_layers, self.cv_dim, t)
+        w = torch.softmax(self.cv_layer_w, dim=0).view(1, self.cv_layers, 1, 1)
+        cv = (cv * w).sum(1)
+        cv = self._norm(cv, self.cv_norm)
+        return torch.cat([w_feat, cv], dim=1)
+
+
 class SynthesizerTrn(nn.Module):
     """
     Synthesizer for Training
@@ -453,6 +486,11 @@ class SynthesizerTrn(nn.Module):
         self.emb_uv = nn.Embedding(2, hidden_channels)
         self.character_mix = False
 
+        # 组合编码器:预存特征为多分量拼接,进 pre 前先做可学习合并(3584→ssl_dim)
+        self.content_merge = None
+        if kwargs.get("speech_encoder") == "whisper+contentvec":
+            self.content_merge = ContentMerge(whisper_dim=1280, cv_dim=768, cv_layers=3)
+
     def EnableCharacterMix(self, n_speakers_map, device):
         self.speaker_map = torch.zeros((n_speakers_map, 1, 1, self.gin_channels)).to(device)
         for i in range(n_speakers_map):
@@ -462,6 +500,9 @@ class SynthesizerTrn(nn.Module):
 
     def forward(self, c, f0, uv, spec, g=None, c_lengths=None, spec_lengths=None, vol = None):
         g = self.emb_g(g).transpose(1,2)
+
+        if self.content_merge is not None:
+            c = self.content_merge(c)
 
         # vol proj
         vol = self.emb_vol(vol[:,:,None]).transpose(1,2) if vol is not None and self.vol_embedding else 0
@@ -499,6 +540,9 @@ class SynthesizerTrn(nn.Module):
             torch.cuda.manual_seed_all(seed)
         else:
             torch.manual_seed(seed)
+
+        if self.content_merge is not None:
+            c = self.content_merge(c)
 
         c_lengths = (torch.ones(c.size(0)) * c.size(-1)).to(c.device)
 

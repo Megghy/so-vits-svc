@@ -32,7 +32,7 @@ if __name__ == "__main__":
     parser.add_argument("--source_dir", type=str, default="./dataset/44k", help="path to source dir")
     parser.add_argument("--config_out", type=str, default="configs/config.json", help="path to output config.json")
     parser.add_argument("--diff_config_out", type=str, default="configs/diffusion.yaml", help="path to output diffusion.yaml")
-    parser.add_argument("--speech_encoder", type=str, default="vec768l12", help="choice a speech encoder|'vec768l12','vec256l9','hubertsoft','whisper-ppg','cnhubertlarge','dphubert','whisper-ppg-large','wavlmbase+','wavlmlarge','etawavlmlarge'")
+    parser.add_argument("--speech_encoder", type=str, default="vec768l12", help="choice a speech encoder|'vec768l12','vec256l9','hubertsoft','whisper-ppg','cnhubertlarge','dphubert','whisper-ppg-large','wavlmbase+','wavlmlarge','etawavlmlarge','whisper+contentvec'")
     parser.add_argument("--vol_aug", action="store_true", help="Whether to use volume embedding and volume augmentation")
     parser.add_argument("--tiny", action="store_true", help="Whether to train sovits tiny")
     parser.add_argument("--reuse_config", action="store_true", help="若输出文件已存在，则以其为基底，仅更新说话人/编码器相关字段，保留已调好的训练超参")
@@ -116,6 +116,10 @@ if __name__ == "__main__":
     elif args.speech_encoder == "whisper-ppg-large":
         config_template["model"]["ssl_dim"] = config_template["model"]["filter_channels"] = config_template["model"]["gin_channels"] = 1280
         d_config_template["data"]["encoder_out_channels"] = 1280
+    elif args.speech_encoder == "whisper+contentvec":
+        # 预存特征为 whisper(1280)+contentvec 三层(3×768)=3584,模型内 ContentMerge 合并到 2048 再进 pre
+        config_template["model"]["ssl_dim"] = config_template["model"]["filter_channels"] = config_template["model"]["gin_channels"] = 2048
+        d_config_template["data"]["encoder_out_channels"] = 3584
         
     if args.vol_aug:
         config_template["train"]["vol_aug"] = config_template["model"]["vol_embedding"] = True

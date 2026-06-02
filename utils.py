@@ -163,6 +163,9 @@ def get_speech_encoder(speech_encoder,device=None,**kargs):
     elif speech_encoder == "etawavlmlarge":
         from vencoder.EtaWavLMLarge import EtaWavLMLarge
         speech_encoder_object = EtaWavLMLarge(device = device)
+    elif speech_encoder == "whisper+contentvec":
+        from vencoder.WhisperContentVec import WhisperContentVec
+        speech_encoder_object = WhisperContentVec(device = device)
     else:
         raise Exception("Unknown speech encoder")
     return speech_encoder_object 

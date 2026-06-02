@@ -32,7 +32,7 @@
     "rs_skip_loudnorm": true,
     "rs_sr": 44100,
     "rs_numproc": 16,
-    "ds_encoder": "whisper+contentvec",
+    "ds_encoder": "vec768l12mix",
     "ds_volaug": true,
     "ds_f0method": "rmvpe",
     "ds_numproc": 3,

@@ -204,7 +204,6 @@ class Unit2Mel(nn.Module):
         noise = torch.randn((1, 1, self.decoder.mel_bins, condition.shape[2]), dtype=torch.float32)
         pndm_speedup = torch.LongTensor([100])
         K_steps = torch.LongTensor([1000])
-        self.decoder = torch.jit.script(self.decoder)
         self.decoder(condition, noise, pndm_speedup, K_steps)
 
         torch.onnx.export(

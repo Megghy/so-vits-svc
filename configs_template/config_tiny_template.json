@@ -19,13 +19,18 @@
     "warmup_epochs": 0,
     "c_mel": 45,
     "c_kl": 1.0,
+    "c_speaker_adv": 0.1,
     "use_sr": true,
     "max_speclen": 512,
     "port": "8001",
     "keep_ckpts": 3,
     "all_in_mem": false,
     "num_workers": 2,
-    "vol_aug":false
+    "vol_aug":false,
+    "feature_aug": false,
+    "feature_aug_noise": 0.0,
+    "feature_aug_time_mask": 0,
+    "feature_aug_channel_dropout": 0.0
   },
   "data": {
     "training_files": "filelists/train.txt",
@@ -62,6 +67,10 @@
     "ssl_dim": 768,
     "n_speakers": 200,
     "vocoder_name":"nsf-hifigan",
+    "bigvgan_model":"nvidia/bigvgan_v2_44khz_128band_512x",
+    "bigvgan_mel_channels":128,
+    "bigvgan_trainable":false,
+    "bigvgan_cuda_kernel":false,
     "speech_encoder":"vec768l12",
     "whisper_path":"pretrain/large-v3.pt",
     "speaker_embedding":false,
@@ -69,7 +78,12 @@
     "use_depthwise_conv":true,
     "flow_share_parameter": true,
     "use_automatic_f0_prediction": true,
-    "use_transformer_flow": false
+    "use_transformer_flow": false,
+    "use_speaker_adversarial": false,
+    "speaker_adversarial_weight": 1.0,
+    "use_cqt_disc": false,
+    "use_mrd_disc": false,
+    "use_mbd_disc": false
   },
   "spk": {
     "nyaru": 0,

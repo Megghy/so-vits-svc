@@ -369,6 +369,59 @@ class ContentMerge(nn.Module):
         return torch.cat([w_feat, cv], dim=1)
 
 
+class ContentVecLayerMerge(nn.Module):
+    def __init__(self, cv_dim=768, cv_layers=3):
+        super().__init__()
+        self.cv_dim = cv_dim
+        self.cv_layers = cv_layers
+        self.cv_layer_w = nn.Parameter(torch.zeros(cv_layers))
+        self.norm = nn.LayerNorm(cv_dim)
+
+    def forward(self, c):
+        b, _, t = c.shape
+        cv = c.view(b, self.cv_layers, self.cv_dim, t)
+        weights = torch.softmax(self.cv_layer_w, dim=0).view(1, self.cv_layers, 1, 1)
+        cv = (cv * weights).sum(1)
+        return self.norm(cv.transpose(1, 2)).transpose(1, 2)
+
+
+class GradientReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight):
+        ctx.weight = weight
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.weight * grad_output, None
+
+
+class SpeakerAdversarialHead(nn.Module):
+    def __init__(self, hidden_channels, n_speakers, weight=1.0):
+        super().__init__()
+        self.weight = float(weight)
+        self.proj = nn.Linear(hidden_channels, n_speakers)
+
+    def forward(self, x, x_mask):
+        denom = x_mask.sum(dim=-1).clamp_min(1.0)
+        pooled = (x * x_mask).sum(dim=-1) / denom
+        pooled = GradientReverse.apply(pooled, self.weight)
+        return self.proj(pooled)
+
+
+def discriminator_kinds(hps_model):
+    kinds = ["mpd"]
+    if getattr(hps_model, "use_cqt_disc", False):
+        kinds.append("cqt")
+    if getattr(hps_model, "use_mrd_disc", False):
+        kinds.append("mrd")
+    if getattr(hps_model, "use_mbd_disc", False):
+        kinds.append("mbd")
+    return kinds
+
+
+
+
 class SynthesizerTrn(nn.Module):
     """
     Synthesizer for Training
@@ -402,6 +455,8 @@ class SynthesizerTrn(nn.Module):
                  n_flow_layer = 4,
                  n_layers_trans_flow = 3,
                  use_transformer_flow = False,
+                 use_speaker_adversarial = False,
+                 speaker_adversarial_weight = 1.0,
                  **kwargs):
 
         super().__init__()
@@ -427,6 +482,7 @@ class SynthesizerTrn(nn.Module):
         self.use_depthwise_conv = use_depthwise_conv
         self.use_automatic_f0_prediction = use_automatic_f0_prediction
         self.n_layers_trans_flow = n_layers_trans_flow
+        self.use_speaker_adversarial = use_speaker_adversarial
         if vol_embedding:
            self.emb_vol = nn.Linear(1, hidden_channels)
 
@@ -462,6 +518,15 @@ class SynthesizerTrn(nn.Module):
         elif vocoder_name == "nsf-snake-hifigan":
             from vdecoder.hifiganwithsnake.models import Generator
             self.dec = Generator(h=hps)
+        elif vocoder_name in ("bigvgan", "bigvgan-v2"):
+            from vdecoder.bigvgan import BigVGANDecoder
+            self.dec = BigVGANDecoder(
+                inter_channels,
+                n_mel_channels=kwargs.get("bigvgan_mel_channels", 128),
+                model_name=kwargs.get("bigvgan_model", "nvidia/bigvgan_v2_44khz_128band_512x"),
+                trainable=kwargs.get("bigvgan_trainable", False),
+                use_cuda_kernel=kwargs.get("bigvgan_cuda_kernel", False),
+            )
         else:
             print("[?] Unkown vocoder: use default(nsf-hifigan)")
             from vdecoder.hifigan.models import Generator
@@ -490,6 +555,11 @@ class SynthesizerTrn(nn.Module):
         self.content_merge = None
         if kwargs.get("speech_encoder") == "whisper+contentvec":
             self.content_merge = ContentMerge(whisper_dim=1280, cv_dim=768, cv_layers=3)
+        elif kwargs.get("speech_encoder") == "vec768l12mix":
+            self.content_merge = ContentVecLayerMerge(cv_dim=768, cv_layers=3)
+        self.speaker_adv = None
+        if self.use_speaker_adversarial:
+            self.speaker_adv = SpeakerAdversarialHead(hidden_channels, n_speakers, speaker_adversarial_weight)
 
     def EnableCharacterMix(self, n_speakers_map, device):
         self.speaker_map = torch.zeros((n_speakers_map, 1, 1, self.gin_channels)).to(device)
@@ -510,6 +580,7 @@ class SynthesizerTrn(nn.Module):
         # ssl prenet
         x_mask = torch.unsqueeze(commons.sequence_mask(c_lengths, c.size(2)), 1).to(c.dtype)
         x = self.pre(c) * x_mask + self.emb_uv(uv.long()).transpose(1,2) + vol
+        speaker_adv_logits = self.speaker_adv(x, x_mask) if self.speaker_adv is not None else None
         
         # f0 predict
         if self.use_automatic_f0_prediction:
@@ -531,7 +602,7 @@ class SynthesizerTrn(nn.Module):
         # nsf decoder
         o = self.dec(z_slice, g=g, f0=pitch_slice)
 
-        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0
+        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits
 
     @torch.no_grad()
     def infer(self, c, f0, uv, g=None, noice_scale=0.35, seed=52468, predict_f0=False, vol = None):
@@ -574,4 +645,3 @@ class SynthesizerTrn(nn.Module):
         z = self.flow(z_p, c_mask, g=g, reverse=True)
         o = self.dec(z * c_mask, g=g, f0=f0)
         return o,f0
-

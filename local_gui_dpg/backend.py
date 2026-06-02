@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""后端逻辑：Job/TermBuffer/Player/命令构造，复用自 local_gui.py"""
+"""后端逻辑：Job/TermBuffer/Player/命令构造。"""
 import os
 import re
 import queue

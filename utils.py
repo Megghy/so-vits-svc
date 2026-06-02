@@ -121,6 +121,9 @@ def get_speech_encoder(speech_encoder, device=None, **kargs):
     if speech_encoder == "vec768l12":
         from vencoder.ContentVec768L12 import ContentVec768L12
         speech_encoder_object = ContentVec768L12(device = device)
+    elif speech_encoder == "vec768l12mix":
+        from vencoder.ContentVec768LayerMix import ContentVec768LayerMix
+        speech_encoder_object = ContentVec768LayerMix(device = device)
     elif speech_encoder == "vec256l9":
         from vencoder.ContentVec256L9 import ContentVec256L9
         speech_encoder_object = ContentVec256L9(device = device)
@@ -396,7 +399,7 @@ def get_hparams_from_file(config_path, infer_mode = False):
 def check_git_hash(model_dir):
   source_dir = os.path.dirname(os.path.realpath(__file__))
   if not os.path.exists(os.path.join(source_dir, ".git")):
-    logger.warn("{} is not a git repository, therefore hash value comparison will be ignored.".format(
+    logger.warning("{} is not a git repository, therefore hash value comparison will be ignored.".format(
       source_dir
     ))
     return
@@ -407,7 +410,7 @@ def check_git_hash(model_dir):
   if os.path.exists(path):
     saved_hash = open(path).read()
     if saved_hash != cur_hash:
-      logger.warn("git hash values are different. {}(saved) != {}(current)".format(
+      logger.warning("git hash values are different. {}(saved) != {}(current)".format(
         saved_hash[:8], cur_hash[:8]))
   else:
     open(path, "w").write(cur_hash)

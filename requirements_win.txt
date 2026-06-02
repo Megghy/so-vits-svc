@@ -1,4 +1,4 @@
-librosa==0.9.1
+librosa==0.11.0
 fairseq==0.12.2
 ffmpeg-python
 Flask==2.1.2
@@ -33,3 +33,4 @@ pynvml
 faiss-cpu
 nnAudio
 soxr
+bigvgan>=2.4.1

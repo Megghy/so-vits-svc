@@ -247,7 +247,7 @@ class Svc(object):
             self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample, 16000).to(self.dev)
         wav16k = self.audio16k_resample_transform(wav[None,:])[0]
 
-        with torch.cuda.amp.autocast(enabled=self.dtype != torch.float32, dtype=self.dtype):
+        with torch.amp.autocast(self.dev.type, enabled=self.dtype != torch.float32, dtype=self.dtype):
             c = self.hubert_model.encoder(wav16k)
         c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1],self.unit_interpolate_mode)
 
@@ -333,7 +333,7 @@ class Svc(object):
                     if not hasattr(self,"audio16k_resample_transform"):
                         self.audio16k_resample_transform = torchaudio.transforms.Resample(self.target_sample, 16000).to(self.dev)
                     audio16k = self.audio16k_resample_transform(audio[None,:])[0]
-                    with torch.cuda.amp.autocast(enabled=self.dtype != torch.float32, dtype=self.dtype):
+                    with torch.amp.autocast(self.dev.type, enabled=self.dtype != torch.float32, dtype=self.dtype):
                         c = self.hubert_model.encoder(audio16k)
                     c = utils.repeat_expand_2d(c.squeeze(0), f0.shape[1],self.unit_interpolate_mode)
                 f0 = f0[:,:,None]

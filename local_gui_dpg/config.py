@@ -15,9 +15,10 @@ SETTINGS_FILE = os.path.join(ROOT, "gui_settings.json")
 for d in (PROJECT_DIR, PRESET_DIR):
     os.makedirs(d, exist_ok=True)
 
-SPEECH_ENCODERS = ["vec768l12", "vec256l9", "hubertsoft", "whisper-ppg",
+SPEECH_ENCODERS = ["vec768l12", "vec768l12mix", "vec256l9", "hubertsoft", "whisper-ppg",
                    "cnhubertlarge", "dphubert", "whisper-ppg-large", "wavlmbase+", "wavlmlarge",
                    "etawavlmlarge", "whisper+contentvec"]
+VOCODERS = ["nsf-hifigan", "nsf-snake-hifigan", "bigvgan-v2"]
 F0_METHODS = ["rmvpe", "fcpe", "crepe", "pm", "dio", "harvest"]
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac")
 
@@ -52,6 +53,7 @@ CONFIG_FIELDS = [
     ("model.speech_encoder", "内容编码器", "combo", "vec768l12", SPEECH_ENCODERS,
      "内容特征提取器，决定咬字清晰度与音色泄漏程度。\n"
      "· vec768l12：默认，唱歌综合最优，ssl_dim=768\n"
+     "· vec768l12mix：ContentVec L6/L9/L12 三层预存，模型内可学习合并到 768，需重抽特征\n"
      "· wavlmlarge：WavLM-Large(取第6层)，解耦更强、咬字更准，ssl_dim需改为1024\n"
      "· etawavlmlarge：在 wavlmlarge 上做 Eta-WavLM 线性去说话人(ssl_dim=1024)，\n"
      "  音色泄漏更低。需先 `python eta_wavlm_fit.py --in_dir <多说话人wav目录>` 拟合投影\n"
@@ -62,6 +64,20 @@ CONFIG_FIELDS = [
      "切换后必须重新预处理(重抽特征)并重训。"),
     ("model.whisper_path", "Whisper权重路径", "str", "pretrain/large-v3.pt", None,
      "whisper+contentvec 使用的 Whisper 权重路径。训练和推理必须保持一致。"),
+    ("model.vocoder_name", "声码器", "combo", "nsf-hifigan", VOCODERS,
+     "生成端声码器。\n"
+     "· nsf-hifigan：默认，稳定、显存开销低。\n"
+     "· nsf-snake-hifigan：周期激活增强。\n"
+     "· bigvgan-v2：实验项，先把 VITS latent 投影为 BigVGAN mel，再用 BigVGAN 生成波形。\n"
+     "  建议 hop_length=512、44.1k，需安装 bigvgan>=2.4.1。改动结构，需重新训练。"),
+    ("model.bigvgan_model", "BigVGAN模型名", "str", "nvidia/bigvgan_v2_44khz_128band_512x", None,
+     "vocoder_name=bigvgan-v2 时使用的 BigVGAN checkpoint。默认匹配 44.1k / 512x。"),
+    ("model.bigvgan_mel_channels", "BigVGAN mel通道", "int", 128, (80, 128),
+     "BigVGAN 输入 mel 通道数。默认 128，对应 nvidia/bigvgan_v2_44khz_128band_512x。"),
+    ("model.bigvgan_trainable", "微调 BigVGAN", "bool", False, None,
+     "是否训练 BigVGAN 本体。关闭时只训练 latent→mel 投影，显存更省；开启可提升适配但更容易不稳定。"),
+    ("model.bigvgan_cuda_kernel", "BigVGAN CUDA kernel", "bool", False, None,
+     "启用 BigVGAN fused CUDA kernel。训练期建议先关闭，推理优化时再试。"),
     # ===== 判别器增强（BigVGAN-v2，仅影响训练，不改推理）=====
     ("model.use_cqt_disc", "CQT 判别器", "bool", False, None,
      "MS-SB-CQT 多尺度子带常Q变换判别器(BigVGAN-v2)。\n"
@@ -98,6 +114,11 @@ CONFIG_FIELDS = [
      "随机将整条特征通道置零并按 1/(1-p) 重缩放(保持期望幅度)。\n"
      "0=关闭。建议 0.05~0.2。\n"
      "需先勾选「特征域增强」。"),
+    ("model.use_speaker_adversarial", "说话人对抗解耦", "bool", False, None,
+     "在内容特征后加 gradient reversal 说话人分类头，降低源歌手音色泄漏。\n"
+     "翻唱实验项；开启后配合下方 c_speaker_adv 调权重。改动结构，需重新训练。"),
+    ("model.speaker_adversarial_weight", "  └ 反梯度强度", "float", 1.0, (0.0, 5.0),
+     "gradient reversal 强度。1.0 为标准强度，过大可能伤咬字。"),
     # ===== 高级模型结构（不常用，改动需重新训练）=====
     ("model.use_transformer_flow", "Transformer Flow", "bool", False, None,
      "用 Transformer 耦合块替换默认的残差耦合 flow，建模能力更强、显存开销更高。\n"
@@ -138,6 +159,8 @@ CONFIG_FIELDS = [
      "重建梅尔频谱损失权重，默认 45。调大更重视音质细节。"),
     ("train.c_kl", "KL损失权重(c_kl)", "float", 1.0, (0.1, 5.0),
      "KL 散度损失权重，默认 1.0。一般不改。"),
+    ("train.c_speaker_adv", "说话人对抗损失权重", "float", 0.1, (0.0, 5.0),
+     "仅在 model.use_speaker_adversarial=true 时生效。建议从 0.05~0.1 开始。"),
     ("train.seed", "随机种子", "int", 1234, (0, 999999),
      "训练随机种子，固定可复现。"),
 ]
@@ -148,16 +171,20 @@ CONFIG_GROUPS = [
     ("基础训练", ["train.batch_size", "train.learning_rate", "train.epochs",
                   "train.eval_interval", "train.log_interval", "train.keep_ckpts",
                   "train.fp16_run", "train.half_type", "train.all_in_mem", "train.num_workers"], True),
-    ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path"], True),
+    ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path",
+                    "model.vocoder_name", "model.bigvgan_model", "model.bigvgan_mel_channels",
+                    "model.bigvgan_trainable", "model.bigvgan_cuda_kernel"], True),
     ("判别器增强 (BigVGAN-v2，仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
                                           "model.use_mbd_disc"], True),
     ("数据增强", ["train.vol_aug", "train.feature_aug", "train.feature_aug_noise",
                   "train.feature_aug_time_mask", "train.feature_aug_channel_dropout"], True),
-    ("高级模型结构 (不常用，改后需重训)", ["model.use_transformer_flow", "model.flow_share_parameter",
+    ("高级模型结构 (不常用，改后需重训)", ["model.use_speaker_adversarial", "model.speaker_adversarial_weight",
+                                          "model.use_transformer_flow", "model.flow_share_parameter",
                                           "model.n_layers_trans_flow", "model.use_depthwise_conv",
                                           "model.use_automatic_f0_prediction", "model.speaker_embedding"], False),
     ("高级训练超参 (不常用)", ["train.optimizer", "train.weight_decay", "train.warmup_epochs",
-                              "train.lr_decay_steps", "train.c_mel", "train.c_kl", "train.seed"], False),
+                              "train.lr_decay_steps", "train.c_mel", "train.c_kl", "train.c_speaker_adv",
+                              "train.seed"], False),
 ]
 
 # 路径 -> 字段定义，供分组渲染查表
@@ -165,7 +192,7 @@ CONFIG_FIELD_MAP = {f[0]: f for f in CONFIG_FIELDS}
 
 # speech_encoder -> 期望 ssl_dim（与 preprocess_flist_config.py 的设定保持一致）
 ENCODER_DIM = {
-    "vec768l12": 768, "dphubert": 768, "wavlmbase+": 768,
+    "vec768l12": 768, "vec768l12mix": 768, "dphubert": 768, "wavlmbase+": 768,
     "vec256l9": 256, "hubertsoft": 256,
     "whisper-ppg": 1024, "cnhubertlarge": 1024, "wavlmlarge": 1024, "etawavlmlarge": 1024,
     "whisper-ppg-large": 1280,
@@ -189,6 +216,10 @@ def check_config(cfg):
             "通常是改了编码器但没重新预处理——需重抽特征并重训，否则维度不匹配会直接报错。"))
     if enc == "whisper+contentvec" and not m.get("whisper_path"):
         out.append(("error", "whisper+contentvec 必须设置 model.whisper_path，训练和推理要使用同一个 Whisper 权重。"))
+    if enc == "vec768l12mix" and m.get("ssl_dim") == 768:
+        out.append(("info", "vec768l12mix 的预存特征是 2304 维，模型内会合并到 768；切换后必须重新预处理。"))
+    if m.get("vocoder_name") in ("bigvgan", "bigvgan-v2") and cfg.get("data", {}).get("hop_length") != 512:
+        out.append(("warn", "BigVGAN-v2 默认 checkpoint 是 512x，上采样倍率应与 data.hop_length=512 对齐。"))
 
     # Lion / AdamW 超参
     opt = (t.get("optimizer") or "adamw").lower()
@@ -219,6 +250,8 @@ def check_config(cfg):
         out.append(("warn", "feature_aug=true 但 噪声/时间掩码/通道dropout 三个强度全为 0，增强无任何效果。"))
     elif not t.get("feature_aug") and any(augs):
         out.append(("info", "设置了 feature_aug 强度但 feature_aug=false，当前未启用。"))
+    if m.get("use_speaker_adversarial") and t.get("c_speaker_adv", 0) <= 0:
+        out.append(("warn", "use_speaker_adversarial=true 但 c_speaker_adv<=0，对抗损失不会生效。"))
 
     # warmup
     if t.get("warmup_epochs", 0) == 0:

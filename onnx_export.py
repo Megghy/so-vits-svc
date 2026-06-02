@@ -89,7 +89,6 @@ def OnnxExport(path=None):
             test_sid.to(device)
         )
 
-    # SVCVITS = torch.jit.script(SVCVITS)
     SVCVITS(test_hidden_unit.to(device),
             test_pitch.to(device),
             test_mel2ph.to(device),

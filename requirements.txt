@@ -18,7 +18,7 @@ onnx
 onnxsim
 onnxoptimizer
 fairseq==0.12.2
-librosa==0.9.1
+librosa==0.11.0
 tensorboard
 tensorboardX
 transformers
@@ -29,3 +29,5 @@ pynvml
 faiss-cpu
 einops
 local_attention
+nnAudio
+bigvgan>=2.4.1

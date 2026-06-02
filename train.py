@@ -127,23 +127,7 @@ def run(rank, n_gpus, hps):
         hps.data.filter_length // 2 + 1,
         hps.train.segment_size // hps.data.hop_length,
         **hps.model).cuda(rank)
-    if getattr(hps.model, "use_cqt_disc", False) or getattr(hps.model, "use_mrd_disc", False) or getattr(hps.model, "use_mbd_disc", False):
-        from modules.discriminators_cqt import (
-            CombinedDiscriminator,
-            MultiBandDiscriminator,
-            MultiResolutionDiscriminator,
-            MultiScaleSubbandCQTDiscriminator,
-        )
-        discs = [MultiPeriodDiscriminator(hps.model.use_spectral_norm)]
-        if getattr(hps.model, "use_cqt_disc", False):
-            discs.append(MultiScaleSubbandCQTDiscriminator({"sampling_rate": hps.data.sampling_rate}))
-        if getattr(hps.model, "use_mrd_disc", False):
-            discs.append(MultiResolutionDiscriminator({}))
-        if getattr(hps.model, "use_mbd_disc", False):
-            discs.append(MultiBandDiscriminator({}))
-        net_d = CombinedDiscriminator(discs).cuda(rank)
-    else:
-        net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
+    net_d = build_discriminator(hps.model, hps.data).cuda(rank)
     optim_g = build_optimizer(net_g.parameters(), hps.train)
     optim_d = build_optimizer(net_d.parameters(), hps.train)
     # Windows 上 torch>=2.4 的 DDP+gloo backward 会触发 access violation 崩溃，
@@ -191,6 +175,34 @@ def run(rank, n_gpus, hps):
                                [train_loader, None], None, None)
 
 
+def build_discriminator(hps_model, hps_data):
+    kinds = ["mpd"]
+    if getattr(hps_model, "use_cqt_disc", False):
+        kinds.append("cqt")
+    if getattr(hps_model, "use_mrd_disc", False):
+        kinds.append("mrd")
+    if getattr(hps_model, "use_mbd_disc", False):
+        kinds.append("mbd")
+
+    if kinds == ["mpd"]:
+        return MultiPeriodDiscriminator(hps_model.use_spectral_norm)
+
+    from modules.discriminators_cqt import (
+        CombinedDiscriminator,
+        MultiBandDiscriminator,
+        MultiResolutionDiscriminator,
+        MultiScaleSubbandCQTDiscriminator,
+    )
+    discs = [MultiPeriodDiscriminator(hps_model.use_spectral_norm)]
+    if "cqt" in kinds:
+        discs.append(MultiScaleSubbandCQTDiscriminator({"sampling_rate": hps_data.sampling_rate}))
+    if "mrd" in kinds:
+        discs.append(MultiResolutionDiscriminator({}))
+    if "mbd" in kinds:
+        discs.append(MultiBandDiscriminator({}))
+    return CombinedDiscriminator(discs)
+
+
 def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, writers):
     net_g, net_d = nets
     optim_g, optim_d = optims
@@ -203,6 +215,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
     base_lr = hps.train.learning_rate
     warmup_steps = hps.train.warmup_epochs * len(train_loader)
     decay_steps = getattr(hps.train, "lr_decay_steps", 100000)
+    c_speaker_adv = getattr(hps.train, "c_speaker_adv", 0.0)
 
     # train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -233,8 +246,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
         
         with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
             y_hat, ids_slice, z_mask, \
-            (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0 = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
-                                                                                spec_lengths=lengths,vol = volume)
+            (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
+                                                                                                    spec_lengths=lengths,vol = volume)
 
             y_mel = commons.slice_segments(mel, ids_slice, hps.train.segment_size // hps.data.hop_length)
             y_hat_mel = mel_spectrogram_torch(
@@ -272,7 +285,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
                 loss_lf0 = F.mse_loss(pred_lf0, lf0) if getattr(net_g, "module", net_g).use_automatic_f0_prediction else 0
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0
+                loss_speaker_adv = F.cross_entropy(speaker_adv_logits, g.squeeze(1)) * c_speaker_adv if speaker_adv_logits is not None else 0
+                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0 + loss_speaker_adv
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -296,7 +310,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, scaler, loaders, logger, 
                 scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr,
                                "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
                 scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/mel_raw": mel_raw,
-                                    "loss/g/kl": loss_kl, "loss/g/lf0": loss_lf0, "loss/g/reference": reference_loss})
+                                    "loss/g/kl": loss_kl, "loss/g/lf0": loss_lf0, "loss/g/speaker_adv": loss_speaker_adv,
+                                    "loss/g/reference": reference_loss})
 
                 # scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
                 # scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})

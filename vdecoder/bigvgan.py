@@ -1,6 +1,10 @@
+from pathlib import Path
+
 import torch
 from torch import nn
-from torch.nn import functional as F
+
+
+BIGVGAN_CACHE_DIR = str(Path(__file__).resolve().parents[1] / "pretrain")
 
 
 class BigVGANMelHead(nn.Module):
@@ -86,7 +90,7 @@ class BigVGANDecoder(nn.Module):
         self.vocoder = bigvgan.BigVGAN._from_pretrained(
             model_id=model_name,
             revision=None,
-            cache_dir=None,
+            cache_dir=BIGVGAN_CACHE_DIR,
             force_download=False,
             proxies=None,
             resume_download=False,
@@ -107,6 +111,15 @@ class BigVGANDecoder(nn.Module):
         if not self.trainable:
             self.vocoder.eval()
         return self
+
+    def unfreeze_vocoder(self):
+        """运行时解冻声码器,供自动分阶段训练调用。"""
+        if self.trainable:
+            return
+        self.trainable = True
+        for param in self.vocoder.parameters():
+            param.requires_grad = True
+        self.vocoder.train()
 
     def forward(self, z, g=None, f0=None):
         pred_mel = self.mel_head(z, f0, g=g)

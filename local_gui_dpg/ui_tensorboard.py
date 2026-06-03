@@ -71,7 +71,7 @@ def create_tensorboard_tab(state):
         with dpg.group(horizontal=True):
             dpg.add_button(label="复制全部", callback=lambda: _copy_tb_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "tb", "tb_log", "tb_status"))
-        add_log_panel("tb_log", "tb_log_win", 400)
+        add_log_panel("tb_log", 400)
 
 
 def ensure_started(state, logdir):

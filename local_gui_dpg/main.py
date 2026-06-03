@@ -7,7 +7,7 @@ import dearpygui.dearpygui as dpg
 from . import config, backend, theme
 from . import ui_log
 from .ui_dataset import create_dataset_tab
-from .ui_train import create_train_tab, _refresh_chart, _plot_chart
+from .ui_train import create_train_tab, refresh_config_fields, _refresh_chart, _plot_chart
 from .ui_infer import create_infer_tab, _refresh_ckpts, _refresh_presets
 from .ui_tensorboard import create_tensorboard_tab
 
@@ -127,17 +127,7 @@ def _refresh_project_ui(state):
 
     # 刷新训练页的配置字段
     if os.path.exists(config.config_path(proj)):
-        cfg = config.load_config(proj)
-        for path, _, ftype, _, _, _ in config.CONFIG_FIELDS:
-            tag = f"cfg_{path}"
-            try:
-                keys = path.split(".")
-                node = cfg
-                for k in keys:
-                    node = node[k]
-                dpg.set_value(tag, node)
-            except (KeyError, TypeError):
-                pass
+        refresh_config_fields(proj)
 
     # 刷新训练曲线
     _refresh_chart(state)
@@ -146,12 +136,12 @@ def _refresh_project_ui(state):
 def _update_logs(state):
     """定时刷新所有日志窗口"""
     pending = state.setdefault("pending_log_scroll", set())
-    for key, log_tag, win_tag in [("ds", "ds_log", "ds_log_win"),
-                                   ("train", "train_log", "train_log_win"),
-                                   ("diff", "diff_log", "diff_log_win"),
-                                   ("infer", "inf_log", "inf_log_win"),
-                                   ("cluster", "cluster_log", "cluster_log_win"),
-                                   ("tb", "tb_log", "tb_log_win")]:
+    for key, log_tag in [("ds", "ds_log"),
+                         ("train", "train_log"),
+                         ("diff", "diff_log"),
+                         ("infer", "inf_log"),
+                         ("cluster", "cluster_log"),
+                         ("tb", "tb_log")]:
         if key not in state["jobs"]:
             continue
         job = state["jobs"][key]
@@ -159,23 +149,19 @@ def _update_logs(state):
             text = job.buf.snapshot()
             if dpg.does_item_exist(log_tag):
                 ui_log.set_log_text(log_tag, text)
-                pending.add(win_tag)
+                if ui_log.log_should_follow(log_tag):
+                    pending.add(log_tag)
 
 
 def _scroll_pending_logs(state):
-    """文本更新后等一帧布局完成，再滚动到底部。"""
+    """日志文本更新后等一帧布局完成，再把开启自动跟随的日志滚到底。"""
     pending = state.setdefault("pending_log_scroll", set())
     if not pending:
         return
-    for win_tag in list(pending):
-        if not dpg.does_item_exist(win_tag):
-            pending.discard(win_tag)
-            continue
-        try:
-            dpg.set_y_scroll(win_tag, dpg.get_y_scroll_max(win_tag))
-        except (SystemError, Exception):
-            pass
-        pending.discard(win_tag)
+    for log_tag in list(pending):
+        if ui_log.log_should_follow(log_tag):
+            ui_log.scroll_log_to_bottom(log_tag)
+        pending.discard(log_tag)
 
 
 def _update_player(state):

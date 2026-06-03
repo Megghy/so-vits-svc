@@ -170,3 +170,5 @@ infer_out/
 projects/
 .*/
 gui_settings.json
+docs/
+/AGENTS.md

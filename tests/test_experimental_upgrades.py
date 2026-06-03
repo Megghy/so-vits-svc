@@ -168,6 +168,64 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         self.assertEqual(768, cfg["model"]["ssl_dim"])
         self.assertEqual(2304, config.ENCODER_FEATURE_DIM["vec768l12mix"])
 
+    def test_bigvgan_phase2_decision_broadcasts_to_non_rank_zero_workers(self):
+        from modules.bigvgan_strategy import BigVGANStrategy
+        from utils import HParams
+
+        strategy = BigVGANStrategy(HParams(train=HParams()), model_dir=".")
+        calls = []
+
+        class FakeDistributed:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def is_initialized():
+                return True
+
+            @staticmethod
+            def broadcast(tensor, src):
+                calls.append(src)
+                tensor.fill_(1)
+
+        previous_distributed = torch.distributed
+        torch.distributed = FakeDistributed
+        try:
+            self.assertTrue(strategy.sync_phase2_decision(False))
+        finally:
+            torch.distributed = previous_distributed
+
+        self.assertEqual([0], calls)
+
+    def test_bigvgan_strategy_reads_nested_hparams_config(self):
+        from modules.bigvgan_strategy import BigVGANStrategy
+        from utils import HParams
+
+        hps = HParams(
+            train=HParams(
+                bigvgan_strategy=HParams(
+                    mode="auto_finetune",
+                    phase1_disc_start=12345,
+                    phase1_mel_target=0.42,
+                    phase2_vocoder_lr=2e-5,
+                    grad_clip_norm=4.0,
+                    use_mel_loss=False,
+                    use_bigvgan_mel_loss=True,
+                )
+            )
+        )
+
+        strategy = BigVGANStrategy(hps, model_dir=".")
+
+        self.assertEqual("auto_finetune", strategy.mode)
+        self.assertEqual(12345, strategy.phase1_disc_start)
+        self.assertEqual(0.42, strategy.phase1_mel_target)
+        self.assertEqual(2e-5, strategy.phase2_vocoder_lr)
+        self.assertEqual(4.0, strategy.grad_clip_norm)
+        self.assertFalse(strategy.use_mel_loss)
+        self.assertTrue(strategy.use_bigvgan_mel_loss)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,15 +1,15 @@
 {
   "volume": 100,
   "project": "kina",
-  "device": "GPU",
+  "device": "CPU",
   "chart_auto": false,
   "chart_log": false,
   "infer": {
-    "inf_ckpt": "",
+    "inf_ckpt": "G_18000.pth",
     "inf_spk": "kina",
     "inf_diff_model": "",
     "inf_input": "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_isolated_44k_stereo.wav",
-    "inf_device": "GPU",
+    "inf_device": "CPU",
     "inf_trans": 0,
     "inf_f0method": "rmvpe",
     "inf_autof0": false,

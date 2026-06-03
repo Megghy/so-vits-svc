@@ -5,22 +5,40 @@ import dearpygui.dearpygui as dpg
 _FALLBACK_LINE_H = 13.0
 
 
-def add_log_panel(log_tag, win_tag, height):
-    """可选中复制的日志面板：外层 child_window 负责滚动(支持自动滚到底)，
-    内层只读多行输入框承载文本(可用鼠标选中、Ctrl+C 复制)。"""
-    with dpg.child_window(tag=win_tag, height=height, border=True, horizontal_scrollbar=True):
+def log_window_tag(log_tag):
+    return f"{log_tag}_win"
+
+
+def log_follow_tag(log_tag):
+    return f"{log_tag}_follow"
+
+
+def add_log_panel(log_tag, height):
+    """固定高度日志区：外层唯一滚动容器，内层只读文本框用于选择复制。"""
+    dpg.add_checkbox(label="自动跟随", tag=log_follow_tag(log_tag), default_value=True)
+    with dpg.child_window(tag=log_window_tag(log_tag), height=height, border=True,
+                          horizontal_scrollbar=True):
         dpg.add_input_text(tag=log_tag, multiline=True, readonly=True, width=-1, height=10)
 
 
 def set_log_text(log_tag, text):
-    """更新日志文本，并把输入框高度撑到与内容等高，让外层 child_window 接管滚动。
-    (input_text 自身的滚动无法被程序控制，故必须让它不产生内部滚动。)"""
     if not dpg.does_item_exist(log_tag):
         return
     dpg.set_value(log_tag, text)
     size = dpg.get_text_size("Ag")
     line_h = size[1] if size else _FALLBACK_LINE_H
-    dpg.configure_item(log_tag, height=int((text.count("\n") + 2) * line_h))
+    dpg.configure_item(log_tag, height=max(10, int((text.count("\n") + 3) * line_h)))
+
+
+def log_should_follow(log_tag):
+    tag = log_follow_tag(log_tag)
+    return not dpg.does_item_exist(tag) or bool(dpg.get_value(tag))
+
+
+def scroll_log_to_bottom(log_tag):
+    tag = log_window_tag(log_tag)
+    if dpg.does_item_exist(tag):
+        dpg.set_y_scroll(tag, dpg.get_y_scroll_max(tag))
 
 
 def clear_job_log(state, job_key, log_tag, status_tag=None):

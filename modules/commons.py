@@ -165,18 +165,30 @@ def generate_path(duration, mask):
 
 
 def clip_grad_value_(parameters, clip_value, norm_type=2):
+  """计算梯度 L2 norm 并可选地裁剪。
+
+  Args:
+    clip_value: None=只测量不裁剪; 非空=裁剪到该 norm 阈值(torch.nn.utils.clip_grad_norm_ 风格)
+
+  Returns:
+    total_norm: 裁剪前的梯度 L2 norm
+  """
   if isinstance(parameters, torch.Tensor):
     parameters = [parameters]
   parameters = list(filter(lambda p: p.grad is not None, parameters))
   norm_type = float(norm_type)
-  if clip_value is not None:
-    clip_value = float(clip_value)
 
   total_norm = 0
   for p in parameters:
     param_norm = p.grad.data.norm(norm_type)
     total_norm += param_norm.item() ** norm_type
-    if clip_value is not None:
-      p.grad.data.clamp_(min=-clip_value, max=clip_value)
   total_norm = total_norm ** (1. / norm_type)
+
+  if clip_value is not None:
+    clip_value = float(clip_value)
+    clip_coef = clip_value / (total_norm + 1e-6)
+    if clip_coef < 1:
+      for p in parameters:
+        p.grad.data.mul_(clip_coef)
+
   return total_norm

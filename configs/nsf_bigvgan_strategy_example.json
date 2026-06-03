@@ -1,0 +1,88 @@
+{
+  "_comment": "NSF-BigVGAN 分阶段训练策略配置示例",
+
+  "phase1": {
+    "description": "Warm-up: 冻结 BigVGAN 主干，只训练 mel_head + NSF 分支 (noise_convs + m_source)",
+    "target_steps": 50000,
+    "trainable_vocoder": false,
+
+    "losses": {
+      "mel_l1": 45.0,
+      "waveform_mel": 45.0,
+      "kl_loss": 1.0
+    },
+
+    "discriminators": {
+      "enabled": false,
+      "_comment": "Phase1 不开判别器，避免惩罚初期过强的谐波"
+    },
+
+    "optimization": {
+      "learning_rate": 2e-4,
+      "grad_clip_norm": null,
+      "_comment": "Phase1 梯度裁剪可以不开，因为只训部分网络"
+    },
+
+    "validation": {
+      "check_harmonic_energy": true,
+      "_comment": "每 1000 步验证 har_source 能量分布，确保不是全 0 或爆炸"
+    }
+  },
+
+  "phase2": {
+    "description": "Fine-tune: 低 lr 解冻 BigVGAN 主干，全量微调",
+    "target_steps": 100000,
+    "trainable_vocoder": true,
+
+    "losses": {
+      "mel_l1": 45.0,
+      "waveform_mel": 45.0,
+      "kl_loss": 1.0,
+      "fm_loss": 2.0,
+      "gen_loss": 1.0
+    },
+
+    "discriminators": {
+      "enabled": true,
+      "types": ["mpd", "cqt", "mrd"],
+      "_comment": "Phase2 开启全部判别器"
+    },
+
+    "optimization": {
+      "learning_rate": 2e-4,
+      "vocoder_lr_scale": 0.1,
+      "_comment": "BigVGAN 主干用 1/10 学习率 (2e-5)",
+      "grad_clip_norm": 1.0,
+      "_comment": "Phase2 必须开梯度裁剪，防止对抗训练不稳定"
+    },
+
+    "validation": {
+      "check_harmonic_energy": true,
+      "check_mel_reconstruction": true
+    }
+  },
+
+  "transition": {
+    "description": "从 Phase1 切换到 Phase2 的触发条件",
+    "auto_trigger_at_steps": 50000,
+    "or_manual_trigger": true,
+    "_comment": "可以手动在训练中途调用 model.unfreeze_vocoder()"
+  },
+
+  "model_config": {
+    "vocoder_name": "nsf-bigvgan-v2",
+    "model_name": "nvidia/bigvgan_v2_44khz_128band_512x",
+    "sampling_rate": 44100,
+    "harmonic_num": 8,
+    "use_cuda_kernel": false,
+    "_comment_cuda": "CUDA kernel 需要 NVIDIA GPU 和编译，默认关闭",
+    "remove_weight_norm": true
+  },
+
+  "expected_behaviors": {
+    "phase1_loss_curve": "mel_l1 应该在前 10k 步快速下降，50k 步收敛到 ~0.3-0.5",
+    "phase2_loss_spike": "解冻后前 5k 步损失可能短暂上升，这是正常的分布调整",
+    "harmonic_source_check": "har_source 的 RMS 应该在 0.01-0.1 范围，过小说明没激活，过大会破坏波形",
+    "final_quality": "应该同时具备 BigVGAN 的清晰度和 NSF 的音高稳定性"
+  }
+}

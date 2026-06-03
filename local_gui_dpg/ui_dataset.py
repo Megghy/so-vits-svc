@@ -308,7 +308,7 @@ def create_dataset_tab(state):
             dpg.add_text("执行日志:")
             dpg.add_button(label="复制全部", callback=lambda: _copy_log(state, "ds"))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "ds", "ds_log", "ds_pipe_msg"))
-        add_log_panel("ds_log", "ds_log_win", 300)
+        add_log_panel("ds_log", 300)
 
     # 按当前编码器初始化专属区块的可见性
     _refresh_encoder_sections(dpg.get_value("ds_encoder"))

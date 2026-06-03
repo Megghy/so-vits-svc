@@ -18,7 +18,7 @@ for d in (PROJECT_DIR, PRESET_DIR):
 SPEECH_ENCODERS = ["vec768l12", "vec768l12mix", "vec256l9", "hubertsoft", "whisper-ppg",
                    "cnhubertlarge", "dphubert", "whisper-ppg-large", "wavlmbase+", "wavlmlarge",
                    "etawavlmlarge", "whisper+contentvec"]
-VOCODERS = ["nsf-hifigan", "nsf-snake-hifigan", "bigvgan-v2"]
+VOCODERS = ["nsf-hifigan", "nsf-snake-hifigan", "bigvgan-v2", "nsf-bigvgan-v2"]
 F0_METHODS = ["rmvpe", "fcpe", "crepe", "pm", "dio", "harvest"]
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac")
 
@@ -33,6 +33,12 @@ CONFIG_FIELDS = [
      "训练轮数上限。实际按step保存，此值影响学习率衰减。"),
     ("train.eval_interval", "验证/保存间隔(step)", "int", 2000, (100, 10000),
      "每N步验证一次并保存checkpoint。建议1000-3000。"),
+    ("train.eval_speaker_similarity", "验证音色相似度", "bool", True, None,
+     "验证时用 WavLM x-vector 计算 gen/gt 音色相似度，只写入 TensorBoard，不参与训练反传。"),
+    ("train.eval_speaker_similarity_items", "相似度样本数", "int", 4, (1, 16),
+     "每次验证最多计算多少条 gen/gt 音频对。数值越大，验证越慢；建议 2-4。"),
+    ("train.eval_speaker_model", "相似度模型", "str", "microsoft/wavlm-base-plus-sv", None,
+     "说话人相似度使用的 Hugging Face WavLM x-vector 模型名或本地目录。"),
     ("train.log_interval", "日志间隔(step)", "int", 200, (10, 1000),
      "每N步打印一次loss到终端和TensorBoard。"),
     ("train.keep_ckpts", "保留最近ckpt数", "int", 3, (1, 10),
@@ -70,15 +76,17 @@ CONFIG_FIELDS = [
      "· nsf-snake-hifigan：周期激活增强。\n"
      "· bigvgan-v2：先用 mel head 把 VITS latent(含f0)解码为 BigVGAN 128-band mel\n"
      "  并直接监督对齐，再用冻结的官方 BigVGAN 生成波形。需 hop_length=512、44.1k，\n"
-     "  需安装 bigvgan>=2.4.1。改动结构，需重新训练。"),
+     "  需安装 bigvgan>=2.4.1。改动结构，需重新训练。\n"
+     "· nsf-bigvgan-v2：在 BigVGAN upsample stage 显式注入 NSF f0 激励源，\n"
+     "  适合优先解决歌声谐波/高频稳定性问题。需重新训练。"),
     ("model.bigvgan_model", "BigVGAN模型名", "str", "nvidia/bigvgan_v2_44khz_128band_512x", None,
-     "vocoder_name=bigvgan-v2 时使用的 BigVGAN checkpoint。默认匹配 44.1k / 512x。"),
+     "BigVGAN 系后端使用的 BigVGAN checkpoint。默认匹配 44.1k / 512x。"),
     ("model.bigvgan_mel_channels", "BigVGAN mel通道", "int", 128, (80, 128),
      "BigVGAN 输入 mel 通道数。默认 128，对应 nvidia/bigvgan_v2_44khz_128band_512x。"),
     ("train.c_bigvgan_mel", "BigVGAN mel监督权重", "float", 45.0, (0.0, 100.0),
      "BigVGAN 两段式：mel head 输出与 BigVGAN 自带 mel 定义生成的目标做 L1 的权重。\n"
      "这是治噪音的核心监督项，让 mel head 先对齐到 vocoder 的输入流形。\n"
-     "建议保持 45 左右，过小则 mel 对齐慢、噪音持续。仅 bigvgan-v2 生效。"),
+     "建议保持 45 左右，过小则 mel 对齐慢、噪音持续。仅 BigVGAN 系后端生效。"),
     ("model.bigvgan_trainable", "微调 BigVGAN", "bool", False, None,
      "是否训练 BigVGAN 本体。关闭时只训练 latent→mel 投影，显存更省；开启可提升适配但更容易不稳定。"),
     ("model.bigvgan_cuda_kernel", "BigVGAN CUDA kernel", "bool", False, None,
@@ -103,7 +111,39 @@ CONFIG_FIELDS = [
      "BigVGAN 两段式专用：前 N 步只用 MPD 判别器，到达该 step 才接入 CQT/MRD/MBD。\n"
      "给随机初始化的 mel head 一段不被多判别器对抗梯度干扰的对齐窗口，避免早期发散。\n"
      "0=从头就全开。建议 5000~20000，看 TensorBoard 的 loss/g/bigvgan_mel 压平后再开。\n"
-     "续训按 global_step 自动接续，无需手动切换。"),
+     "续训按 global_step 自动接续，无需手动切换。\n"
+     "注意：启用自动分阶段策略时，Phase1 此项会被策略覆盖。"),
+    # ===== BigVGAN 自动分阶段训练策略 =====
+    ("train.bigvgan_strategy.mode", "训练策略", "combo", "frozen",
+     ["frozen", "auto_finetune", "finetune_from_start"],
+     "BigVGAN 两段式声码器训练策略：\n"
+     "· frozen：永久冻结声码器，只训 MelHead(路线1)\n"
+     "· auto_finetune：自动两阶段(推荐)。Phase1 冻结声码器练 MelHead，\n"
+     "  达标后自动解冻微调。适合从头训练和续训。\n"
+     "· finetune_from_start：从头解冻，MelHead 和声码器同时学(激进)"),
+    ("train.bigvgan_strategy.phase1_disc_start", "Phase1 判别器延后步数", "int", 90000, (5000, 200000),
+     "auto_finetune 模式 Phase1 的判别器启动步数。\n"
+     "给 MelHead 更长的对齐窗口，避免过早对抗干扰。\n"
+     "建议 90000(约等 MelHead 收敛所需步数)。仅 auto_finetune 生效。"),
+    ("train.bigvgan_strategy.phase1_mel_target", "Phase1 切换阈值", "float", 0.35, (0.2, 0.5),
+     "auto_finetune 自动切换到 Phase2 的阈值。\n"
+     "当 loss/g/bigvgan_mel 原始 L1 < 此值时解冻声码器。\n"
+     "0.35 对应良好对齐，过小会延后切换。仅 auto_finetune 生效。"),
+    ("train.bigvgan_strategy.phase2_vocoder_lr", "Phase2 声码器 lr", "float", 1e-5, (1e-6, 1e-4),
+     "Phase2 解冻后声码器的固定微调 lr(不跟 cosine 衰减)。\n"
+     "1e-5 是微调预训练声码器的安全值，防灾难性遗忘。\n"
+     "仅 auto_finetune/finetune_from_start 生效。"),
+    ("train.bigvgan_strategy.grad_clip_norm", "梯度裁剪阈值", "float", 5.0, (0.0, 20.0),
+     "梯度 L2 范数裁剪阈值。0=只测量不裁剪。\n"
+     "推荐 5.0 稳定训练，尤其配合 Lion optimizer。\n"
+     "对所有 mode 生效(包括 frozen)。"),
+    ("train.bigvgan_strategy.use_mel_loss", "使用 80-band mel loss", "bool", True, None,
+     "是否用 80-band 穿透声码器的 loss_mel。\n"
+     "Phase2(解冻)时建议保持开启(端到端监督)。\n"
+     "Phase1(frozen)路线1可关闭，纯靠直接监督。"),
+    ("train.bigvgan_strategy.use_bigvgan_mel_loss", "使用 128-band mel loss", "bool", True, None,
+     "是否用 128-band 直接监督 loss_bigvgan_mel(治噪音核心)。\n"
+     "建议始终开启。关闭则 MelHead 无显式对齐目标。"),
     # ===== 数据增强 =====
     ("train.vol_aug", "音量增强", "bool", False, None,
      "训练时随机调整音量并重算频谱，增强对响度变化的鲁棒性。\n仅作用于训练集。"),
@@ -146,9 +186,6 @@ CONFIG_FIELDS = [
     ("model.use_automatic_f0_prediction", "自动 f0 预测", "bool", True, None,
      "内置自动音高预测分支(变声时可不输入参考音高)。\n"
      "关闭可省一点显存，但推理时需自行提供 f0。改动结构，需重新训练。"),
-    ("model.speaker_embedding", "额外说话人嵌入", "bool", False, None,
-     "为内容编码额外注入说话人嵌入，多说话人场景增强区分度。\n"
-     "改动模型结构，需重新训练。"),
     # ===== 高级训练超参（不常用）=====
     ("train.optimizer", "优化器", "combo", "adamw", ["adamw", "lion"],
      "· adamw：默认，稳定通用。\n"
@@ -180,10 +217,21 @@ CONFIG_FIELDS = [
 CONFIG_GROUPS = [
     ("基础训练", ["train.batch_size", "train.learning_rate", "train.epochs",
                   "train.eval_interval", "train.log_interval", "train.keep_ckpts",
-                  "train.fp16_run", "train.half_type", "train.all_in_mem", "train.num_workers"], True),
+                  "train.eval_speaker_similarity", "train.eval_speaker_similarity_items",
+                  "train.eval_speaker_model", "train.fp16_run", "train.half_type",
+                  "train.all_in_mem", "train.num_workers"], True),
     ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path",
                     "model.vocoder_name", "model.bigvgan_model", "model.bigvgan_mel_channels",
                     "train.c_bigvgan_mel", "model.bigvgan_trainable", "model.bigvgan_cuda_kernel"], True),
+    ("BigVGAN 自动分阶段训练策略 (推荐)", [
+        "train.bigvgan_strategy.mode",
+        "train.bigvgan_strategy.phase1_disc_start",
+        "train.bigvgan_strategy.phase1_mel_target",
+        "train.bigvgan_strategy.phase2_vocoder_lr",
+        "train.bigvgan_strategy.grad_clip_norm",
+        "train.bigvgan_strategy.use_mel_loss",
+        "train.bigvgan_strategy.use_bigvgan_mel_loss"
+    ], True),
     ("判别器增强 (BigVGAN-v2，仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
                                           "model.use_mbd_disc", "train.disc_start_step"], True),
     ("数据增强", ["train.vol_aug", "train.feature_aug", "train.feature_aug_noise",
@@ -191,7 +239,7 @@ CONFIG_GROUPS = [
     ("高级模型结构 (不常用，改后需重训)", ["model.use_speaker_adversarial", "model.speaker_adversarial_weight",
                                           "model.use_transformer_flow", "model.flow_share_parameter",
                                           "model.n_layers_trans_flow", "model.use_depthwise_conv",
-                                          "model.use_automatic_f0_prediction", "model.speaker_embedding"], False),
+                                          "model.use_automatic_f0_prediction"], False),
     ("高级训练超参 (不常用)", ["train.optimizer", "train.weight_decay", "train.warmup_epochs",
                               "train.lr_decay_steps", "train.c_mel", "train.c_kl", "train.c_speaker_adv",
                               "train.seed"], False),
@@ -199,6 +247,57 @@ CONFIG_GROUPS = [
 
 # 路径 -> 字段定义，供分组渲染查表
 CONFIG_FIELD_MAP = {f[0]: f for f in CONFIG_FIELDS}
+
+# 字段动态显隐：path -> 谓词(get)，get(path) 返回另一字段的当前值。
+# 不在表中的字段恒显示。核心目的：某模块未选中时，其专属设置整体隐藏，避免迷惑。
+BIGVGAN_VOCODERS = ("bigvgan", "bigvgan-v2", "nsf-bigvgan-v2")
+
+
+def _is_bigvgan(get):
+    return get("model.vocoder_name") in BIGVGAN_VOCODERS
+
+
+FIELD_VISIBILITY = {
+    # 编码器专属
+    "model.whisper_path": lambda get: get("model.speech_encoder") == "whisper+contentvec",
+    # BigVGAN 系声码器专属(非 BigVGAN 声码器下整组消失)
+    "model.bigvgan_model": _is_bigvgan,
+    "model.bigvgan_mel_channels": _is_bigvgan,
+    "train.c_bigvgan_mel": _is_bigvgan,
+    "model.bigvgan_trainable": _is_bigvgan,
+    "model.bigvgan_cuda_kernel": _is_bigvgan,
+    "model.use_cqt_disc": _is_bigvgan,
+    "model.use_mrd_disc": _is_bigvgan,
+    "model.use_mbd_disc": _is_bigvgan,
+    "train.disc_start_step": _is_bigvgan,
+    "train.bigvgan_strategy.mode": _is_bigvgan,
+    "train.bigvgan_strategy.grad_clip_norm": _is_bigvgan,
+    "train.bigvgan_strategy.use_mel_loss": _is_bigvgan,
+    "train.bigvgan_strategy.use_bigvgan_mel_loss": _is_bigvgan,
+    # BigVGAN 策略 mode 子项(需 BigVGAN 声码器 + 对应 mode)
+    "train.bigvgan_strategy.phase1_disc_start":
+        lambda get: _is_bigvgan(get) and get("train.bigvgan_strategy.mode") == "auto_finetune",
+    "train.bigvgan_strategy.phase1_mel_target":
+        lambda get: _is_bigvgan(get) and get("train.bigvgan_strategy.mode") == "auto_finetune",
+    "train.bigvgan_strategy.phase2_vocoder_lr":
+        lambda get: _is_bigvgan(get) and get("train.bigvgan_strategy.mode") in ("auto_finetune", "finetune_from_start"),
+    # 数据增强子项(仅开启特征域增强时)
+    "train.feature_aug_noise": lambda get: bool(get("train.feature_aug")),
+    "train.feature_aug_time_mask": lambda get: bool(get("train.feature_aug")),
+    "train.feature_aug_channel_dropout": lambda get: bool(get("train.feature_aug")),
+    # 说话人对抗(仅开启时显示权重和损失系数)
+    "model.speaker_adversarial_weight": lambda get: bool(get("model.use_speaker_adversarial")),
+    "train.c_speaker_adv": lambda get: bool(get("model.use_speaker_adversarial")),
+    # Transformer Flow 层数(仅开启 Transformer Flow 时)
+    "model.n_layers_trans_flow": lambda get: bool(get("model.use_transformer_flow")),
+}
+
+
+def field_visible(path, get):
+    """字段是否应显示:不在显隐表中的恒显示,否则按谓词求值。"""
+    pred = FIELD_VISIBILITY.get(path)
+    return True if pred is None else bool(pred(get))
+
 
 # speech_encoder -> 模型内部输入维度。组合/多层编码器会先把预存特征合并到这个维度。
 ENCODER_DIM = {
@@ -248,7 +347,7 @@ def check_config(cfg):
         out.append(("error", "whisper+contentvec 必须设置 model.whisper_path，训练和推理要使用同一个 Whisper 权重。"))
     if enc == "vec768l12mix" and m.get("ssl_dim") == 768:
         out.append(("info", "vec768l12mix 的预存特征是 2304 维，模型内会合并到 768；切换后必须重新预处理。"))
-    if m.get("vocoder_name") in ("bigvgan", "bigvgan-v2") and cfg.get("data", {}).get("hop_length") != 512:
+    if m.get("vocoder_name") in ("bigvgan", "bigvgan-v2", "nsf-bigvgan-v2") and cfg.get("data", {}).get("hop_length") != 512:
         out.append(("warn", "BigVGAN-v2 默认 checkpoint 是 512x，上采样倍率应与 data.hop_length=512 对齐。"))
 
     # Lion / AdamW 超参
@@ -339,7 +438,19 @@ def create_project(name):
 
 def load_config(name):
     with open(config_path(name), encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # 兼容旧配置:若没有 bigvgan_strategy 则注入默认值
+    if "bigvgan_strategy" not in cfg.get("train", {}):
+        cfg.setdefault("train", {})["bigvgan_strategy"] = {
+            "mode": "frozen",
+            "phase1_disc_start": 90000,
+            "phase1_mel_target": 0.35,
+            "phase2_vocoder_lr": 1e-5,
+            "grad_clip_norm": 5.0,
+            "use_mel_loss": True,
+            "use_bigvgan_mel_loss": True
+        }
+    return cfg
 
 
 def save_config(name, values):

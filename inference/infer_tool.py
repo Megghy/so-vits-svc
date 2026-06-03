@@ -136,7 +136,7 @@ class Svc(object):
             self.dev = torch.device(device)
 
         # Auto-detect optimal dtype: BF16 for Ampere+, FP16 for older, FP32 for CPU
-        if half_precision and torch.cuda.is_available():
+        if half_precision and self.dev.type == "cuda":
             compute_cap = torch.cuda.get_device_capability(self.dev)
             self.dtype = torch.bfloat16 if compute_cap[0] >= 8 else torch.float16
         else:
@@ -218,7 +218,7 @@ class Svc(object):
             **self.hps_ms.model)
         _ = utils.load_checkpoint(self.net_g_path, self.net_g_ms, None)
         self.dtype = list(self.net_g_ms.parameters())[0].dtype
-        if "half" in self.net_g_path and torch.cuda.is_available():
+        if "half" in self.net_g_path and self.dev.type == "cuda":
             _ = self.net_g_ms.half().eval().to(self.dev)
         else:
             _ = self.net_g_ms.eval().to(self.dev)

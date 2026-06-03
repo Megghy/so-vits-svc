@@ -182,7 +182,11 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, skip_optimizer=False
     iteration = checkpoint_dict['iteration']
     learning_rate = checkpoint_dict['learning_rate']
     if optimizer is not None and not skip_optimizer and checkpoint_dict['optimizer'] is not None:
-        optimizer.load_state_dict(checkpoint_dict['optimizer'])
+        try:
+            optimizer.load_state_dict(checkpoint_dict['optimizer'])
+        except (ValueError, KeyError, RuntimeError) as e:
+            logger.warning(f"Optimizer state_dict 加载失败(可能是 param_groups 结构变化): {e}")
+            logger.warning("已重置 optimizer 动量,模型权重完整保留。Lion/AdamW 动量会在数百步内重建。")
     saved_state_dict = checkpoint_dict['model']
     model = model.to(list(saved_state_dict.values())[0].dtype)
     if hasattr(model, 'module'):

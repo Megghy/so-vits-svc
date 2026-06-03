@@ -321,7 +321,7 @@ def create_infer_tab(state):
             dpg.add_text("推理日志:")
             dpg.add_button(label="复制全部", callback=lambda: _copy_infer_log(state))
             dpg.add_button(label="清除内容", callback=lambda: clear_job_log(state, "infer", "inf_log", "out_path"))
-        add_log_panel("inf_log", "inf_log_win", 230)
+        add_log_panel("inf_log", 230)
 
 
 def _refresh_ckpts(state):

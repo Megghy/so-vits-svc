@@ -533,6 +533,19 @@ class SynthesizerTrn(nn.Module):
                 use_cuda_kernel=kwargs.get("bigvgan_cuda_kernel", False),
                 gin_channels=gin_channels,
             )
+        elif vocoder_name == "nsf-bigvgan-v2":
+            from vdecoder.nsf_bigvgan import NSFBigVGANDecoder
+            self.dec = NSFBigVGANDecoder(
+                inter_channels,
+                n_mel_channels=kwargs.get("bigvgan_mel_channels", 128),
+                model_name=kwargs.get("bigvgan_model", "nvidia/bigvgan_v2_44khz_128band_512x"),
+                sampling_rate=sampling_rate,
+                harmonic_num=kwargs.get("nsf_bigvgan_harmonic_num", 8),
+                trainable=kwargs.get("bigvgan_trainable", False),
+                use_cuda_kernel=kwargs.get("bigvgan_cuda_kernel", False),
+                remove_weight_norm=kwargs.get("bigvgan_remove_weight_norm", True),
+                gin_channels=gin_channels,
+            )
         else:
             print("[?] Unkown vocoder: use default(nsf-hifigan)")
             from vdecoder.hifigan.models import Generator

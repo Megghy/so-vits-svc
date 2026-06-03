@@ -95,21 +95,21 @@ def create_train_tab(state):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "train"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "train", "train_log", "train_msg"))
-                add_log_panel("train_log", "train_log_win", 380)
+                add_log_panel("train_log", 380)
 
             with dpg.tab(label="扩散日志"):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "diff"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "diff", "diff_log", "diff_msg"))
-                add_log_panel("diff_log", "diff_log_win", 380)
+                add_log_panel("diff_log", 380)
 
             with dpg.tab(label="聚类/检索日志"):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="复制全部", callback=lambda: _copy_train_log(state, "cluster"))
                     dpg.add_button(label="清除内容",
                                    callback=lambda: clear_job_log(state, "cluster", "cluster_log", "cluster_msg"))
-                add_log_panel("cluster_log", "cluster_log_win", 380)
+                add_log_panel("cluster_log", 380)
 
             with dpg.tab(label="训练曲线"):
                 with dpg.group(horizontal=True):
@@ -137,11 +137,16 @@ def _add_config_field(path):
         return
     _, name, ftype, default, range_opts, tooltip = field
     tag = f"cfg_{path}"
-    dpg.add_text(name + ":")
+
+    # 显隐由 config.FIELD_VISIBILITY 统一管理,创建后由 _apply_visibility() 一次性算好。
+    dpg.add_text(name + ":", tag=f"{tag}_label")
     if ftype == "bool":
-        dpg.add_checkbox(tag=tag, default_value=default, callback=_auto_save_config)
+        dpg.add_checkbox(tag=tag, default_value=default, callback=lambda: _on_config_change(path))
+    elif ftype == "str":
+        dpg.add_input_text(tag=tag, default_value=default, width=300, callback=_auto_save_config)
     elif ftype == "combo":
-        dpg.add_combo(range_opts, tag=tag, default_value=default, width=150, callback=_auto_save_config)
+        dpg.add_combo(range_opts, tag=tag, default_value=default, width=150,
+                      callback=lambda: _on_config_change(path))
     elif ftype == "int":
         if range_opts:
             dpg.add_drag_int(tag=tag, default_value=default, min_value=range_opts[0],
@@ -154,15 +159,72 @@ def _add_config_field(path):
                                max_value=range_opts[1], width=150, format="%.6f", callback=_auto_save_config)
         else:
             dpg.add_input_float(tag=tag, default_value=default, width=150, format="%.6f", step=0, callback=_auto_save_config)
+    else:
+        raise ValueError(f"unsupported config field type: {ftype}")
     if tooltip:
         with dpg.tooltip(dpg.last_item()):
             dpg.add_text(tooltip)
 
 
+def _apply_visibility():
+    """按 config.FIELD_VISIBILITY 重算所有字段显隐。任一字段变更后全量重算,
+    无需逐字段维护联动分支。"""
+    def get(p):
+        tag = f"cfg_{p}"
+        return dpg.get_value(tag) if dpg.does_item_exist(tag) else None
+
+    visible_paths = {}
+    for path in config.CONFIG_FIELD_MAP:
+        tag = f"cfg_{path}"
+        if not dpg.does_item_exist(tag):
+            continue
+        vis = config.field_visible(path, get)
+        visible_paths[path] = vis
+        dpg.configure_item(tag, show=vis)
+        dpg.configure_item(f"{tag}_label", show=vis)
+
+    for group_index, (_, paths, _) in enumerate(config.CONFIG_GROUPS):
+        group_tag = f"cfg_group_{group_index}"
+        group_visible = any(visible_paths.get(path, False) for path in paths)
+        if dpg.does_item_exist(group_tag):
+            dpg.configure_item(group_tag, show=group_visible)
+
+        for row_index in range((len(paths) + 1) // 2):
+            row_tag = f"cfg_group_{group_index}_row_{row_index}"
+            row_paths = paths[row_index * 2:row_index * 2 + 2]
+            row_visible = any(visible_paths.get(path, False) for path in row_paths)
+            if dpg.does_item_exist(row_tag):
+                dpg.configure_item(row_tag, show=row_visible)
+
+
+def _on_config_change(path):
+    """配置项变更回调,自动保存并全量重算显隐。"""
+    _auto_save_config()
+    _apply_visibility()
+
+
+def refresh_config_fields(proj):
+    """从工程 config.json 写入训练参数控件并刷新显隐。"""
+    cfg = config.load_config(proj)
+    for path, _, ftype, _, _, _ in config.CONFIG_FIELDS:
+        tag = f"cfg_{path}"
+        if not dpg.does_item_exist(tag):
+            continue
+        try:
+            node = cfg
+            for key in path.split("."):
+                node = node[key]
+            dpg.set_value(tag, node)
+        except (KeyError, TypeError):
+            pass
+    _apply_visibility()
+
+
 def _create_config_fields():
     """按分组渲染配置字段，每组一个折叠面板，组内 2 列网格。"""
-    for group_name, paths, default_open in config.CONFIG_GROUPS:
-        with dpg.collapsing_header(label=group_name, default_open=default_open):
+    for group_index, (group_name, paths, default_open) in enumerate(config.CONFIG_GROUPS):
+        with dpg.collapsing_header(label=group_name, default_open=default_open,
+                                   tag=f"cfg_group_{group_index}"):
             with dpg.table(header_row=False, borders_innerH=True, borders_outerH=True,
                            borders_innerV=True, borders_outerV=True):
                 dpg.add_table_column()
@@ -170,7 +232,7 @@ def _create_config_fields():
                 dpg.add_table_column()
                 dpg.add_table_column()
                 for i in range(0, len(paths), 2):
-                    with dpg.table_row():
+                    with dpg.table_row(tag=f"cfg_group_{group_index}_row_{i // 2}"):
                         for j in range(2):
                             idx = i + j
                             if idx >= len(paths):
@@ -178,6 +240,9 @@ def _create_config_fields():
                                 dpg.add_text("")
                                 continue
                             _add_config_field(paths[idx])
+
+    # 初始化显隐状态(加载配置后触发)
+    _apply_visibility()
 
 
 def _start_train(state):
@@ -259,17 +324,7 @@ def _reload_config(state):
     if not os.path.exists(config.config_path(proj)):
         dpg.set_value("cfg_msg", "配置不存在，先跑预处理。")
         return
-    cfg = config.load_config(proj)
-    for path, _, ftype, _, _, _ in config.CONFIG_FIELDS:
-        tag = f"cfg_{path}"
-        try:
-            keys = path.split(".")
-            node = cfg
-            for k in keys:
-                node = node[k]
-            dpg.set_value(tag, node)
-        except KeyError:
-            pass
+    refresh_config_fields(proj)
     dpg.set_value("cfg_msg", "已从配置文件重新加载。")
     _check_config(state, silent=True)
 

@@ -14,6 +14,7 @@
     ],
     "eps": 1e-09,
     "batch_size": 6,
+    "gradient_accumulation_steps": 1,
     "fp16_run": false,
     "half_type": "fp16",
     "lr_decay_steps": 100000,

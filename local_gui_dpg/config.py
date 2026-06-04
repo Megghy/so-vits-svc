@@ -26,6 +26,9 @@ AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac")
 CONFIG_FIELDS = [
     ("train.batch_size", "batch_size", "int", 8, (1, 64),
      "每步训练的样本数。显存大用32-48，小用4-8。"),
+    ("train.gradient_accumulation_steps", "梯度累计步数", "int", 1, (1, 16),
+     "每 N 个 batch 执行一次优化器更新，用更小单步 batch 模拟更大等效 batch。\n"
+     "显存按 batch_size 计算，等效 batch≈batch_size×梯度累计步数。"),
     ("train.learning_rate", "学习率", "float", 0.0001, (0.00001, 0.001),
      "学习率。AdamW 默认 1e-4。\n"
      "Lion 须调小到 1/3~1/10(如 2e-5~3e-5)，否则 loss 易在高位震荡不降。"),
@@ -215,7 +218,8 @@ CONFIG_FIELDS = [
 # 训练参数面板分组渲染：(分组名, [json路径...], 默认展开)。仅控制 UI 布局，
 # 保存/加载仍以扁平的 CONFIG_FIELDS 为准。
 CONFIG_GROUPS = [
-    ("基础训练", ["train.batch_size", "train.learning_rate", "train.epochs",
+    ("基础训练", ["train.batch_size", "train.gradient_accumulation_steps",
+                  "train.learning_rate", "train.epochs",
                   "train.eval_interval", "train.log_interval", "train.keep_ckpts",
                   "train.eval_speaker_similarity", "train.eval_speaker_similarity_items",
                   "train.eval_speaker_model", "train.fp16_run", "train.half_type",
@@ -364,6 +368,13 @@ def check_config(cfg):
     # 半精度生效条件
     if t.get("half_type") == "bf16" and not t.get("fp16_run"):
         out.append(("warn", "half_type=bf16 但 fp16_run=false：半精度不生效(实际跑 fp32)。要用 bf16 须 fp16_run=true。"))
+
+    accumulation_steps = int(t.get("gradient_accumulation_steps", 1) or 1)
+    if accumulation_steps > 1:
+        batch_size = int(t.get("batch_size", 0) or 0)
+        out.append(("info",
+            f"梯度累计已开启：单次显存按 batch_size={batch_size} 计算，"
+            f"每 {accumulation_steps} 个 batch 更新一次，等效 batch≈{batch_size * accumulation_steps}。"))
 
     # 增强判别器 + 半精度
     if (m.get("use_cqt_disc") or m.get("use_mrd_disc") or m.get("use_mbd_disc")) and t.get("fp16_run"):

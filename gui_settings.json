@@ -5,16 +5,16 @@
   "chart_auto": false,
   "chart_log": false,
   "infer": {
-    "inf_ckpt": "G_18000.pth",
+    "inf_ckpt": "G_23000.pth",
     "inf_spk": "kina",
     "inf_diff_model": "",
-    "inf_input": "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_isolated_44k_stereo.wav",
+    "inf_input": "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_clean_44k_stereo.wav",
     "inf_device": "CPU",
     "inf_trans": 0,
     "inf_f0method": "rmvpe",
     "inf_autof0": false,
     "inf_slicedb": -40,
-    "inf_noise": 0.4000000059604645,
+    "inf_noise": 0.30000001192092896,
     "inf_shallow": false,
     "inf_kstep": 100,
     "inf_second_enc": false,
@@ -42,6 +42,7 @@
     "ds_eta_dir": "dataset_raw"
   },
   "recent_inputs": [
+    "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_clean_44k_stereo.wav",
     "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_isolated_44k_stereo.wav"
   ]
 }

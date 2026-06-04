@@ -176,29 +176,78 @@ def get_speech_encoder(speech_encoder, device=None, **kargs):
         raise Exception("Unknown speech encoder")
     return speech_encoder_object 
 
+
+def _map_legacy_mpd_discriminator_keys(saved_state_dict, model_state_dict):
+    if not any(k.startswith("discriminators.0.discriminators.") for k in model_state_dict):
+        return saved_state_dict, 0
+    if any(k.startswith("discriminators.0.discriminators.") for k in saved_state_dict):
+        return saved_state_dict, 0
+
+    mapped_state_dict = dict(saved_state_dict)
+    mapped_count = 0
+    for key, value in saved_state_dict.items():
+        if not key.startswith("discriminators."):
+            continue
+        mapped_key = f"discriminators.0.{key}"
+        if mapped_key in model_state_dict:
+            mapped_state_dict[mapped_key] = value
+            mapped_count += 1
+    return mapped_state_dict, mapped_count
+
+
+def _is_snake_decoder_key(key):
+    return (
+        key.startswith("dec.snakes.")
+        or key.startswith("dec.snake_post.")
+        or (key.startswith("dec.resblocks.") and ".activations." in key)
+    )
+
+
+def _drop_legacy_hifigan_decoder_for_snake(saved_state_dict, model_state_dict):
+    if not any(_is_snake_decoder_key(k) for k in model_state_dict):
+        return saved_state_dict, 0
+    if any(_is_snake_decoder_key(k) for k in saved_state_dict):
+        return saved_state_dict, 0
+
+    return {
+        key: value
+        for key, value in saved_state_dict.items()
+        if not key.startswith("dec.")
+    }, sum(1 for key in saved_state_dict if key.startswith("dec."))
+
+
 def load_checkpoint(checkpoint_path, model, optimizer=None, skip_optimizer=False):
     assert os.path.isfile(checkpoint_path)
     checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
     iteration = checkpoint_dict['iteration']
     learning_rate = checkpoint_dict['learning_rate']
-    if optimizer is not None and not skip_optimizer and checkpoint_dict['optimizer'] is not None:
-        try:
-            optimizer.load_state_dict(checkpoint_dict['optimizer'])
-        except (ValueError, KeyError, RuntimeError) as e:
-            logger.warning(f"Optimizer state_dict 加载失败(可能是 param_groups 结构变化): {e}")
-            logger.warning("已重置 optimizer 动量,模型权重完整保留。Lion/AdamW 动量会在数百步内重建。")
     saved_state_dict = checkpoint_dict['model']
     model = model.to(list(saved_state_dict.values())[0].dtype)
     if hasattr(model, 'module'):
         state_dict = model.module.state_dict()
     else:
         state_dict = model.state_dict()
+    saved_state_dict, mapped_count = _map_legacy_mpd_discriminator_keys(saved_state_dict, state_dict)
+    if mapped_count:
+        print(f"[底模] 已映射旧 MPD 判别器层到组合判别器：{mapped_count} 层")
+    saved_state_dict, skipped_snake_decoder = _drop_legacy_hifigan_decoder_for_snake(saved_state_dict, state_dict)
+    if skipped_snake_decoder:
+        print(f"[底模] 当前为 nsf-snake-hifigan，但 checkpoint 是旧 nsf-hifigan decoder；已跳过旧 dec.* {skipped_snake_decoder} 层，Snake decoder 将随机初始化。")
+    effective_skip_optimizer = skip_optimizer or mapped_count or skipped_snake_decoder
+    if optimizer is not None and not effective_skip_optimizer and checkpoint_dict['optimizer'] is not None:
+        try:
+            optimizer.load_state_dict(checkpoint_dict['optimizer'])
+        except (ValueError, KeyError, RuntimeError) as e:
+            logger.warning(f"Optimizer state_dict 加载失败(可能是 param_groups 结构变化): {e}")
+            logger.warning("已重置 optimizer 动量,模型权重完整保留。Lion/AdamW 动量会在数百步内重建。")
+    elif optimizer is not None and not skip_optimizer and (mapped_count or skipped_snake_decoder):
+        logger.warning("checkpoint 结构已迁移，已重置 optimizer 动量。")
     new_state_dict = {}
     missing, shape_mismatch = [], []
     for k, v in state_dict.items():
         if k not in saved_state_dict:
             new_state_dict[k] = v
-            if not any(s in k for s in ("enc_q", "emb_g")):
+            if not any(s in k for s in ("enc_q", "emb_g")) and not (skipped_snake_decoder and k.startswith("dec.")):
                 missing.append(k)
         elif saved_state_dict[k].shape != v.shape:
             new_state_dict[k] = v

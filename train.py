@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import time
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -39,6 +40,11 @@ _speaker_similarity_metric = None
 _speaker_similarity_metric_key = None
 
 # os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'INFO'
+
+
+def set_requires_grad(module, requires_grad):
+    for param in module.parameters():
+        param.requires_grad_(requires_grad)
 
 
 def get_lr(step, base_lr, warmup_steps, decay_steps, min_ratio=0.1):
@@ -131,7 +137,7 @@ def run(rank, n_gpus, hps):
         logger.info(hps)
         utils.check_git_hash(hps.model_dir)
 
-    # for pytorch on win, backend use gloo    
+    # for pytorch on win, backend use gloo
     dist.init_process_group(backend=  'gloo' if os.name == 'nt' else 'nccl', init_method='env://', world_size=n_gpus, rank=rank)
     torch.manual_seed(hps.train.seed)
     torch.cuda.set_device(rank)
@@ -270,7 +276,9 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
     half_type = torch.bfloat16 if hps.train.half_type=="bf16" else torch.float16
 
     base_lr = hps.train.learning_rate
-    warmup_steps = hps.train.warmup_epochs * len(train_loader)
+    accumulation_steps = max(1, int(getattr(hps.train, "gradient_accumulation_steps", 1)))
+    updates_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
+    warmup_steps = hps.train.warmup_epochs * updates_per_epoch
     decay_steps = getattr(hps.train, "lr_decay_steps", 100000)
     c_speaker_adv = getattr(hps.train, "c_speaker_adv", 0.0)
     disc_start_step = bv_strategy.get_disc_start_step() if bv_strategy else getattr(hps.train, "disc_start_step", 10000)
@@ -285,8 +293,10 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
     # Phase2 切换追踪
     recent_mel_losses = []
 
-    # no-GAN warmup:前 disc_warmup_steps 步彻底关闭判别器(仅 nsf-bigvgan-v2 等用)
-    disc_warmup_steps = bv_strategy.disc_warmup_steps if bv_strategy else 0
+    # disc_start_step 前彻底关闭判别器，只训练 G 的重建/时长/f0 主干。
+    # 映射旧 MPD 权重后，预训练 D 从第 0 步参与对抗会压制尚未对齐的 G。
+    configured_disc_warmup_steps = bv_strategy.disc_warmup_steps if bv_strategy else 0
+    disc_warmup_steps = max(configured_disc_warmup_steps, disc_start_step)
 
     # BigVGAN 两段式监督用的 mel:必须用官方权重的 mel 定义(128band/n_fft2048/hop512/
     # win2048/sr44100/fmin0/fmax=None),与 hps.data 的 80-band 配置无关,否则又制造分布错位。
@@ -305,8 +315,14 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
 
     net_g.train()
     net_d.train()
+    optim_g.zero_grad(set_to_none=True)
+    optim_d.zero_grad(set_to_none=True)
     for batch_idx, items in enumerate(train_loader):
-        should_log = rank == 0 and global_step % hps.train.log_interval == 0
+        group_start = (batch_idx // accumulation_steps) * accumulation_steps
+        group_end = min(group_start + accumulation_steps, len(train_loader))
+        current_accumulation_steps = group_end - group_start
+        should_step = batch_idx + 1 == group_end
+        should_log = rank == 0 and should_step and global_step % hps.train.log_interval == 0
         cur_lr = get_lr(global_step, base_lr, warmup_steps, decay_steps)
 
         # 更新主干 lr(第一个 param group),保留 vocoder 的固定 lr(如果有第二个 group)
@@ -332,105 +348,117 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
             hps.data.sampling_rate,
             hps.data.mel_fmin,
             hps.data.mel_fmax)
-        
-        # no-GAN warmup:前 disc_warmup_steps 步彻底关闭判别器
+
+        # no-GAN warmup:disc_start_step 前彻底关闭判别器
         in_warmup = global_step < disc_warmup_steps
 
-        # 判别器自动开关:disc_start_step 前只用 MPD,之后接入 CQT/MRD/MBD,
-        # 给随机初始化的 bigvgan mel head 一段不被多判别器对抗梯度干扰的对齐窗口。
+        # 判别器自动开关:disc_start_step 后接入已启用的判别器。
         if is_combined_disc:
-            if global_step >= disc_start_step:
-                active = set(net_d.kinds)
-            else:
-                active = {"mpd"}
+            active = set(net_d.kinds)
             disc_kwargs = {"active": active}
         else:
             disc_kwargs = {}
 
-        with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
-            y_hat, ids_slice, z_mask, \
-            (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits, pred_mel = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
-                                                                                                    spec_lengths=lengths,vol = volume)
+        sync_gen = nullcontext()
+        if not should_step and hasattr(net_g, "no_sync"):
+            sync_gen = net_g.no_sync()
 
-            y_mel = commons.slice_segments(mel, ids_slice, hps.train.segment_size // hps.data.hop_length)
-            # 80-band y_hat_mel:非 BigVGAN 时是每步 loss;BigVGAN 时仅 log 步用于分频段监控/画图,
-            # 其余步跳过这次 STFT(loss 走 128-band 的 y_hat_bvmel)。
-            need_yhat_mel = bigvgan_mel_spectrogram is None or should_log
-            y_hat_mel = mel_spectrogram_torch(
-                y_hat.squeeze(1),
-                hps.data.filter_length,
-                hps.data.n_mel_channels,
-                hps.data.sampling_rate,
-                hps.data.hop_length,
-                hps.data.win_length,
-                hps.data.mel_fmin,
-                hps.data.mel_fmax
-            ) if need_yhat_mel else None
-            y = commons.slice_segments(y, ids_slice * hps.data.hop_length, hps.train.segment_size)  # slice
+        with sync_gen:
+            with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
+                y_hat, ids_slice, z_mask, \
+                (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0, speaker_adv_logits, pred_mel = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
+                                                                                                        spec_lengths=lengths,vol = volume)
 
-            # Discriminator(warmup 期间彻底跳过,不计算对抗梯度)
+                y_mel = commons.slice_segments(mel, ids_slice, hps.train.segment_size // hps.data.hop_length)
+                # 80-band y_hat_mel:非 BigVGAN 时是每步 loss;BigVGAN 时仅 log 步用于分频段监控/画图,
+                # 其余步跳过这次 STFT(loss 走 128-band 的 y_hat_bvmel)。
+                need_yhat_mel = bigvgan_mel_spectrogram is None or should_log
+                y_hat_mel = mel_spectrogram_torch(
+                    y_hat.squeeze(1),
+                    hps.data.filter_length,
+                    hps.data.n_mel_channels,
+                    hps.data.sampling_rate,
+                    hps.data.hop_length,
+                    hps.data.win_length,
+                    hps.data.mel_fmin,
+                    hps.data.mel_fmax
+                ) if need_yhat_mel else None
+                y = commons.slice_segments(y, ids_slice * hps.data.hop_length, hps.train.segment_size)  # slice
+
             if not in_warmup:
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach(), **disc_kwargs)
-
-                with autocast('cuda', enabled=False, dtype=half_type):
-                    loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
-                    loss_disc_all = loss_disc
+                sync_disc = nullcontext()
+                if not should_step and hasattr(net_d, "no_sync"):
+                    sync_disc = net_d.no_sync()
+                with sync_disc:
+                    with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
+                        y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach(), **disc_kwargs)
+                        with autocast('cuda', enabled=False, dtype=half_type):
+                            loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
+                            loss_disc_all = loss_disc
+                    scaler.scale(loss_disc_all / current_accumulation_steps).backward()
             else:
                 loss_disc = torch.tensor(0.0, device=y_mel.device)
                 loss_disc_all = loss_disc
+                grad_norm_d = None
 
-        if not in_warmup:
-            optim_d.zero_grad()
-            scaler.scale(loss_disc_all).backward()
-            scaler.unscale_(optim_d)
-            grad_norm_d = commons.clip_grad_value_(net_d.parameters(), grad_clip_norm)
-            scaler.step(optim_d)
-        else:
-            grad_norm_d = None
-
-
-        with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
-            # Generator
             if not in_warmup:
-                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat, **disc_kwargs)
-            with autocast('cuda', enabled=False, dtype=half_type):
-                loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
+                set_requires_grad(net_d, False)
+            try:
+                with autocast('cuda', enabled=hps.train.fp16_run, dtype=half_type):
+                    # Generator
+                    if not in_warmup:
+                        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat, **disc_kwargs)
+                    with autocast('cuda', enabled=False, dtype=half_type):
+                        loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
+                        if not in_warmup:
+                            loss_fm = feature_loss(fmap_r, fmap_g)
+                            loss_gen, losses_gen = generator_loss(y_d_hat_g)
+                        else:
+                            loss_fm = torch.tensor(0.0, device=y_mel.device)
+                            loss_gen = torch.tensor(0.0, device=y_mel.device)
+                        loss_lf0 = F.mse_loss(pred_lf0, lf0) if getattr(net_g, "module", net_g).use_automatic_f0_prediction else 0
+                        loss_speaker_adv = F.cross_entropy(speaker_adv_logits, g.squeeze(1)) * c_speaker_adv if speaker_adv_logits is not None else 0
+                        # Mel 监督:BigVGAN 系统一到官方 128-band mel 流形,只有一个 target,消除 80/128 双基错位。
+                        #   loss_mel(wave-domain): BigVGANMel(y_hat) vs target —— 过 vocoder,是唯一能训 NSF source 的 mel 监督
+                        #   loss_bigvgan_mel(direct): pred_mel(mel head 输出) vs target —— 直接拉到 vocoder 输入流形
+                        # 非 BigVGAN 声码器退回项目 80-band wave-domain loss。
+                        loss_bigvgan_mel = torch.tensor(0.0, device=y_mel.device)
+                        if bigvgan_mel_spectrogram is not None:
+                            target_mel = bigvgan_mel_spectrogram(y.squeeze(1).float())
+                            if use_mel_loss:
+                                y_hat_bvmel = bigvgan_mel_spectrogram(y_hat.squeeze(1).float())
+                                loss_mel = F.l1_loss(y_hat_bvmel, target_mel) * hps.train.c_mel
+                            else:
+                                loss_mel = torch.tensor(0.0, device=y_mel.device)
+                            if pred_mel is not None and use_bigvgan_mel_loss:
+                                loss_bigvgan_mel = F.l1_loss(pred_mel.float(), target_mel) * c_bigvgan_mel
+                                # 追踪原始 L1 用于 Phase2 切换判断
+                                if bv_strategy and not bv_strategy.in_phase2:
+                                    recent_mel_losses.append(loss_bigvgan_mel.item() / c_bigvgan_mel)
+                        else:
+                            loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel if use_mel_loss else torch.tensor(0.0, device=y_mel.device)
+                        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0 + loss_speaker_adv + loss_bigvgan_mel
+            finally:
                 if not in_warmup:
-                    loss_fm = feature_loss(fmap_r, fmap_g)
-                    loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                else:
-                    loss_fm = torch.tensor(0.0, device=y_mel.device)
-                    loss_gen = torch.tensor(0.0, device=y_mel.device)
-                loss_lf0 = F.mse_loss(pred_lf0, lf0) if getattr(net_g, "module", net_g).use_automatic_f0_prediction else 0
-                loss_speaker_adv = F.cross_entropy(speaker_adv_logits, g.squeeze(1)) * c_speaker_adv if speaker_adv_logits is not None else 0
-                # Mel 监督:BigVGAN 系统一到官方 128-band mel 流形,只有一个 target,消除 80/128 双基错位。
-                #   loss_mel(wave-domain): BigVGANMel(y_hat) vs target —— 过 vocoder,是唯一能训 NSF source 的 mel 监督
-                #   loss_bigvgan_mel(direct): pred_mel(mel head 输出) vs target —— 直接拉到 vocoder 输入流形
-                # 非 BigVGAN 声码器退回项目 80-band wave-domain loss。
-                loss_bigvgan_mel = torch.tensor(0.0, device=y_mel.device)
-                if bigvgan_mel_spectrogram is not None:
-                    target_mel = bigvgan_mel_spectrogram(y.squeeze(1).float())
-                    if use_mel_loss:
-                        y_hat_bvmel = bigvgan_mel_spectrogram(y_hat.squeeze(1).float())
-                        loss_mel = F.l1_loss(y_hat_bvmel, target_mel) * hps.train.c_mel
-                    else:
-                        loss_mel = torch.tensor(0.0, device=y_mel.device)
-                    if pred_mel is not None and use_bigvgan_mel_loss:
-                        loss_bigvgan_mel = F.l1_loss(pred_mel.float(), target_mel) * c_bigvgan_mel
-                        # 追踪原始 L1 用于 Phase2 切换判断
-                        if bv_strategy and not bv_strategy.in_phase2:
-                            recent_mel_losses.append(loss_bigvgan_mel.item() / c_bigvgan_mel)
-                else:
-                    loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel if use_mel_loss else torch.tensor(0.0, device=y_mel.device)
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_lf0 + loss_speaker_adv + loss_bigvgan_mel
-        optim_g.zero_grad()
-        scaler.scale(loss_gen_all).backward()
-        scaler.unscale_(optim_g)
-        grad_norm_g = commons.clip_grad_value_(net_g.parameters(), grad_clip_norm)
-        scaler.step(optim_g)
-        scaler.update()
+                    set_requires_grad(net_d, True)
 
-        if rank == 0:
+            scaler.scale(loss_gen_all / current_accumulation_steps).backward()
+
+        if should_step:
+            if not in_warmup:
+                scaler.unscale_(optim_d)
+                grad_norm_d = commons.clip_grad_value_(net_d.parameters(), grad_clip_norm)
+                scaler.step(optim_d)
+            scaler.unscale_(optim_g)
+            grad_norm_g = commons.clip_grad_value_(net_g.parameters(), grad_clip_norm)
+            scaler.step(optim_g)
+            scaler.update()
+            optim_g.zero_grad(set_to_none=True)
+            optim_d.zero_grad(set_to_none=True)
+        else:
+            grad_norm_g = None
+
+        if should_step and rank == 0:
             if should_log:
                 lr = optim_g.param_groups[0]['lr']
                 losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_kl]
@@ -505,15 +533,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
                     utils.clean_checkpoints(path_to_models=hps.model_dir, n_ckpts_to_keep=keep_ckpts, sort_by_time=True)
 
         # 所有 rank 都要参与 Phase2 决策同步,避免多卡时只有 rank0 解冻/重建 optimizer。
-        if bv_strategy and global_step % hps.train.eval_interval == 0:
+        if should_step and bv_strategy and global_step % hps.train.eval_interval == 0:
             should_enter_phase2 = rank == 0 and bv_strategy.should_transition_to_phase2(global_step, recent_mel_losses)
             if bv_strategy.sync_phase2_decision(should_enter_phase2):
                 if rank == 0:
                     logger.info("=" * 70)
                     logger.info(f"[BigVGAN Phase2] MelHead 已收敛(mel L1 < {bv_strategy.phase1_mel_target:.3f}),自动切换到 Phase2:")
                     logger.info(f"  - 解冻 BigVGAN vocoder,微调 lr={bv_strategy.phase2_vocoder_lr}")
-                    logger.info(f"  - 判别器立即全开(disc_start_step={global_step})")
-                    logger.info("  - Optimizer 将重建(动量重置),模型权重完整保留")
+                    logger.info(f"  - 开启所有已启用的判别器(disc_start_step={global_step})")
+                    logger.info("  - 重建 Optimizer")
                     logger.info("=" * 70)
 
                 optim_g = build_bigvgan_phase2_optimizer(net_g, hps, bv_strategy.phase2_vocoder_lr)
@@ -529,8 +557,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
                 else:
                     bv_strategy.in_phase2 = True
 
-
-        global_step += 1
+        if should_step:
+            global_step += 1
 
     if rank == 0:
         global start_time

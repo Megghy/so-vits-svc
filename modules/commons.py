@@ -168,7 +168,7 @@ def clip_grad_value_(parameters, clip_value, norm_type=2):
   """计算梯度 L2 norm 并可选地裁剪。
 
   Args:
-    clip_value: None=只测量不裁剪; 非空=裁剪到该 norm 阈值(torch.nn.utils.clip_grad_norm_ 风格)
+    clip_value: None 或 <=0 时只测量不裁剪; >0 时裁剪到该 norm 阈值
 
   Returns:
     total_norm: 裁剪前的梯度 L2 norm
@@ -184,7 +184,7 @@ def clip_grad_value_(parameters, clip_value, norm_type=2):
     total_norm += param_norm.item() ** norm_type
   total_norm = total_norm ** (1. / norm_type)
 
-  if clip_value is not None:
+  if clip_value is not None and float(clip_value) > 0:
     clip_value = float(clip_value)
     clip_coef = clip_value / (total_norm + 1e-6)
     if clip_coef < 1:

@@ -197,6 +197,19 @@ def _apply_visibility():
                 dpg.configure_item(row_tag, show=row_visible)
 
 
+def _visible_config_values():
+    def get(p):
+        tag = f"cfg_{p}"
+        return dpg.get_value(tag) if dpg.does_item_exist(tag) else None
+
+    values = {}
+    for path, *_ in config.CONFIG_FIELDS:
+        tag = f"cfg_{path}"
+        if dpg.does_item_exist(tag) and config.field_visible(path, get):
+            values[path] = dpg.get_value(tag)
+    return values
+
+
 def _on_config_change(path):
     """配置项变更回调,自动保存并全量重算显隐。"""
     _auto_save_config()
@@ -337,10 +350,7 @@ def _save_config(state):
     if not os.path.exists(config.config_path(proj)):
         dpg.set_value("cfg_msg", "配置不存在，先跑预处理。")
         return
-    values = {}
-    for path, _, ftype, _, _, _ in config.CONFIG_FIELDS:
-        tag = f"cfg_{path}"
-        values[path] = dpg.get_value(tag)
+    values = _visible_config_values()
     try:
         changed = config.save_config(proj, values)
         dpg.set_value("cfg_msg", f"已保存 {len(changed)} 项改动。" if changed else "无改动。")
@@ -434,11 +444,7 @@ def _auto_save_config():
     if not os.path.exists(config.config_path(proj)):
         return
 
-    values = {}
-    for path, _, ftype, _, _, _ in config.CONFIG_FIELDS:
-        tag = f"cfg_{path}"
-        if dpg.does_item_exist(tag):
-            values[path] = dpg.get_value(tag)
+    values = _visible_config_values()
 
     try:
         changed = config.save_config(proj, values)

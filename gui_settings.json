@@ -5,18 +5,18 @@
   "chart_auto": false,
   "chart_log": false,
   "infer": {
-    "inf_ckpt": "G_23000.pth",
+    "inf_ckpt": "G_47000.pth",
     "inf_spk": "kina",
-    "inf_diff_model": "",
+    "inf_diff_model": "model_40000.pt",
     "inf_input": "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_clean_44k_stereo.wav",
-    "inf_device": "CPU",
+    "inf_device": "GPU",
     "inf_trans": 0,
     "inf_f0method": "rmvpe",
     "inf_autof0": false,
     "inf_slicedb": -40,
-    "inf_noise": 0.30000001192092896,
+    "inf_noise": 0.5,
     "inf_shallow": false,
-    "inf_kstep": 100,
+    "inf_kstep": 150,
     "inf_second_enc": false,
     "inf_enhance": false,
     "inf_feature_retrieval": false,
@@ -32,7 +32,7 @@
     "rs_skip_loudnorm": true,
     "rs_sr": 44100,
     "rs_numproc": 16,
-    "ds_encoder": "vec768l12mix",
+    "ds_encoder": "vec768l12",
     "ds_volaug": true,
     "ds_f0method": "rmvpe",
     "ds_numproc": 3,
@@ -42,6 +42,8 @@
     "ds_eta_dir": "dataset_raw"
   },
   "recent_inputs": [
+    "D:/outputs/春先終着駅花と散る   理想放逐Acoustic ver._vocals_noreverb.wav",
+    "D:/outputs/忘れてください   吉他弹唱_vocals_noreverb.wav",
     "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_clean_44k_stereo.wav",
     "C:/Users/Megghy/Downloads/Douyin/ABH_7644526847162212069_preprocessed/vocals_isolated_44k_stereo.wav"
   ]

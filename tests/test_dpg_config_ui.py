@@ -93,7 +93,7 @@ class DpgConfigUiTests(unittest.TestCase):
         self.assertTrue(dpg.get_item_configuration(f"cfg_group_{bigvgan_group_index}")["show"])
         self.assertTrue(dpg.get_item_configuration(f"cfg_group_{disc_group_index}")["show"])
 
-    def test_apply_visibility_hides_empty_bigvgan_groups(self):
+    def test_apply_visibility_keeps_discriminator_group_visible_for_nsf(self):
         from local_gui_dpg import config, ui_train
 
         with dpg.window():
@@ -114,7 +114,25 @@ class DpgConfigUiTests(unittest.TestCase):
         )
 
         self.assertFalse(dpg.get_item_configuration(f"cfg_group_{bigvgan_group_index}")["show"])
-        self.assertFalse(dpg.get_item_configuration(f"cfg_group_{disc_group_index}")["show"])
+        self.assertTrue(dpg.get_item_configuration(f"cfg_group_{disc_group_index}")["show"])
+        self.assertTrue(dpg.get_item_configuration("cfg_model.nsf_source_scale")["show"])
+        self.assertTrue(dpg.get_item_configuration("cfg_model.use_cqt_disc")["show"])
+        self.assertTrue(dpg.get_item_configuration("cfg_train.disc_start_step")["show"])
+
+    def test_visible_config_values_omits_hidden_bigvgan_strategy_for_nsf(self):
+        from local_gui_dpg import ui_train
+
+        with dpg.window():
+            ui_train._create_config_fields()
+
+        dpg.set_value("cfg_model.vocoder_name", "nsf-hifigan")
+        ui_train._apply_visibility()
+        values = ui_train._visible_config_values()
+
+        self.assertIn("model.nsf_source_scale", values)
+        self.assertIn("model.use_cqt_disc", values)
+        self.assertIn("train.disc_start_step", values)
+        self.assertNotIn("train.bigvgan_strategy.mode", values)
 
     def test_log_panel_uses_single_scroll_container_with_auto_follow(self):
         from local_gui_dpg import ui_log

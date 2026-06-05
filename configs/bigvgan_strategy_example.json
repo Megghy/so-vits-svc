@@ -36,6 +36,8 @@
     "feature_aug_channel_dropout": 0.05,
     "optimizer": "lion",
     "weight_decay": 0.1,
+    "grad_clip_norm": 5.0,
+    "_grad_clip_norm_comment": "梯度 L2 裁剪阈值,null=只测量不裁;推荐 5.0 稳定训练",
 
     "bigvgan_strategy": {
       "_comment": "BigVGAN 自动分阶段训练策略 - 集中配置所有相关参数",
@@ -53,9 +55,6 @@
 
       "phase2_vocoder_lr": 1e-5,
       "_phase2_vocoder_lr_comment": "Phase2 声码器固定微调 lr(不跟 cosine 衰减),防灾难性遗忘",
-
-      "grad_clip_norm": 5.0,
-      "_grad_clip_norm_comment": "梯度 L2 裁剪阈值,null=只测量不裁;推荐 5.0 稳定训练",
 
       "use_mel_loss": true,
       "_use_mel_loss_comment": "是否用 80-band 穿透声码器的 loss_mel(路线1可关掉)",

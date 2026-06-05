@@ -28,7 +28,7 @@ from models import (
 from modules.optimizers import build_optimizer
 from modules.losses import discriminator_loss, feature_loss, generator_loss, kl_loss
 from modules.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from modules.bigvgan_strategy import BigVGANStrategy
+from modules.bigvgan_strategy import BigVGANStrategy, is_bigvgan_vocoder
 
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('numba').setLevel(logging.WARNING)
@@ -113,9 +113,14 @@ def build_bigvgan_phase2_optimizer(net_g, hps, vocoder_lr):
 
 
 def build_generator_optimizer(net_g, hps, bv_strategy):
-    if bv_strategy.needs_vocoder_finetune():
+    if bv_strategy and bv_strategy.needs_vocoder_finetune():
         return build_bigvgan_phase2_optimizer(net_g, hps, bv_strategy.phase2_vocoder_lr)
     return build_optimizer(net_g.parameters(), hps.train)
+
+
+def get_grad_clip_norm(hps):
+    value = getattr(hps.train, "grad_clip_norm", None)
+    return None if value is None else float(value)
 
 
 def main():
@@ -171,8 +176,10 @@ def run(rank, n_gpus, hps):
         **hps.model).cuda(rank)
     net_d = build_discriminator(hps.model, hps.data).cuda(rank)
 
-    # BigVGAN 自动分阶段训练策略(所有 rank 都要创建,保持一致)
-    bv_strategy = BigVGANStrategy(hps, hps.model_dir)
+    # BigVGAN 分阶段策略只作用于 BigVGAN 系声码器；CQT/MRD/MBD 判别器本身是通用训练组件。
+    bv_strategy = BigVGANStrategy(hps, hps.model_dir) if is_bigvgan_vocoder(hps) else None
+    if rank == 0 and bv_strategy is None and getattr(hps.train, "bigvgan_strategy", None) is not None:
+        logger.warning("当前声码器不是 BigVGAN，已忽略 train.bigvgan_strategy；判别器按 train.disc_start_step 启动。")
 
     optim_g = build_generator_optimizer(net_g, hps, bv_strategy)
     optim_d = build_optimizer(net_d.parameters(), hps.train)
@@ -255,6 +262,11 @@ def build_discriminator(hps_model, hps_data):
     return CombinedDiscriminator(discs, kinds=kinds)
 
 
+def get_vocoder_for_stats(net_g):
+    dec = getattr(getattr(net_g, "module", net_g), "dec", None)
+    return getattr(dec, "vocoder", dec)
+
+
 def get_speaker_similarity_metric(hps):
     global _speaker_similarity_metric, _speaker_similarity_metric_key
     model_path = getattr(hps.train, "eval_speaker_model", DEFAULT_SPEAKER_SIMILARITY_MODEL)
@@ -285,18 +297,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
     c_bigvgan_mel = getattr(hps.train, "c_bigvgan_mel", 45.0)
     is_combined_disc = hasattr(net_d, "kinds")
 
-    # BigVGAN 策略配置
-    grad_clip_norm = bv_strategy.grad_clip_norm if bv_strategy else None
+    grad_clip_norm = get_grad_clip_norm(hps)
     use_mel_loss = bv_strategy.use_mel_loss if bv_strategy else True
     use_bigvgan_mel_loss = bv_strategy.use_bigvgan_mel_loss if bv_strategy else True
 
-    # Phase2 切换追踪
     recent_mel_losses = []
 
-    # disc_start_step 前彻底关闭判别器，只训练 G 的重建/时长/f0 主干。
-    # 映射旧 MPD 权重后，预训练 D 从第 0 步参与对抗会压制尚未对齐的 G。
-    configured_disc_warmup_steps = bv_strategy.disc_warmup_steps if bv_strategy else 0
-    disc_warmup_steps = max(configured_disc_warmup_steps, disc_start_step)
+    # 默认 MPD 从训练开始启用；disc_start_step 只控制 CQT/MRD/MBD 这类附加判别器。
+    # no-GAN warmup(前 N 步彻底关闭判别器)仅 BigVGAN 策略提供，非 BigVGAN 不开。
+    disc_warmup_steps = bv_strategy.disc_warmup_steps if bv_strategy else 0
 
     # BigVGAN 两段式监督用的 mel:必须用官方权重的 mel 定义(128band/n_fft2048/hop512/
     # win2048/sr44100/fmin0/fmax=None),与 hps.data 的 80-band 配置无关,否则又制造分布错位。
@@ -349,12 +358,12 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
             hps.data.mel_fmin,
             hps.data.mel_fmax)
 
-        # no-GAN warmup:disc_start_step 前彻底关闭判别器
+        # no-GAN warmup 是显式配置项；默认不开，避免判别器在某个 step 突然全量接入。
         in_warmup = global_step < disc_warmup_steps
+        extra_disc_active = global_step >= disc_start_step
 
-        # 判别器自动开关:disc_start_step 后接入已启用的判别器。
         if is_combined_disc:
-            active = set(net_d.kinds)
+            active = set(net_d.kinds) if extra_disc_active else {"mpd"}
             disc_kwargs = {"active": active}
         else:
             disc_kwargs = {}
@@ -488,15 +497,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims_ref, scaler, loaders, logg
                         "mel_band/high_l1": F.l1_loss(y_hat_mel[:, hi:], y_mel[:, hi:]),
                     })
 
-                # NSF source 监控:harmonic source RMS(清浊音分离) + 每层可学习 gain,
-                # 直接判断嘶声来自 source 注入过强还是 MelHead 高频误差。
-                vocoder = getattr(getattr(net_g, "module", net_g).dec, "vocoder", None)
+                # NSF source 监控:harmonic source RMS + 每层注入比例,
+                # 用来判断电音感是否来自 source 注入过强。
+                vocoder = get_vocoder_for_stats(net_g)
                 src_stats = getattr(vocoder, "source_stats", None) if vocoder is not None else None
                 if src_stats:
                     scalar_dict.update({f"source/{k}": v for k, v in src_stats.items()})
 
-                # warmup 状态标记(1=纯 mel/KL/f0,无 GAN)
                 scalar_dict["train/disc_warmup"] = 1.0 if in_warmup else 0.0
+                scalar_dict["train/extra_disc_active"] = 1.0 if extra_disc_active else 0.0
 
                 # scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
                 # scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})

@@ -31,6 +31,9 @@ MATPLOTLIB_FLAG = False
 logging.basicConfig(stream=sys.stdout, level=logging.WARN)
 logger = logging
 
+from training_config import BIGVGAN_VOCODERS, normalize_training_config
+
+
 f0_bin = 256
 f0_max = 1100.0
 f0_min = 50.0
@@ -418,12 +421,13 @@ def get_hparams(init=True):
   if init:
     with open(config_path, "r") as f:
       data = f.read()
+    config = normalize_training_config(json.loads(data))
     with open(config_save_path, "w") as f:
-      f.write(data)
+      json.dump(config, f, ensure_ascii=False, indent=2)
   else:
     with open(config_save_path, "r") as f:
       data = f.read()
-  config = json.loads(data)
+    config = normalize_training_config(json.loads(data))
 
   hparams = HParams(**config)
   hparams.model_dir = model_dir
@@ -434,7 +438,7 @@ def get_hparams_from_dir(model_dir):
   config_save_path = os.path.join(model_dir, "config.json")
   with open(config_save_path, "r") as f:
     data = f.read()
-  config = json.loads(data)
+  config = normalize_training_config(json.loads(data))
 
   hparams =HParams(**config)
   hparams.model_dir = model_dir
@@ -444,7 +448,7 @@ def get_hparams_from_dir(model_dir):
 def get_hparams_from_file(config_path, infer_mode = False):
   with open(config_path, "r") as f:
     data = f.read()
-  config = json.loads(data)
+  config = normalize_training_config(json.loads(data))
   hparams =HParams(**config) if not infer_mode else InferHParams(**config)
   return hparams
 

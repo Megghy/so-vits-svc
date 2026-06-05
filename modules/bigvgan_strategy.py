@@ -2,11 +2,18 @@
 import os
 import torch
 
+from training_config import BIGVGAN_VOCODERS
+
 
 def _cfg_get(cfg, key, default):
     if isinstance(cfg, dict):
         return cfg.get(key, default)
     return getattr(cfg, key, default)
+
+
+def is_bigvgan_vocoder(hps):
+    model = getattr(hps, "model", None)
+    return getattr(model, "vocoder_name", "") in BIGVGAN_VOCODERS
 
 
 class BigVGANStrategy:
@@ -17,6 +24,8 @@ class BigVGANStrategy:
     """
 
     def __init__(self, hps, model_dir):
+        if not is_bigvgan_vocoder(hps):
+            raise ValueError("BigVGANStrategy can only be used with BigVGAN vocoders.")
         self.hps = hps
         self.model_dir = model_dir
         self.phase2_marker = os.path.join(model_dir, ".bigvgan_phase2")
@@ -27,7 +36,6 @@ class BigVGANStrategy:
             self.phase1_disc_start = 90000
             self.phase1_mel_target = 0.35
             self.phase2_vocoder_lr = 1e-5
-            self.grad_clip_norm = None
             self.use_mel_loss = True
             self.use_bigvgan_mel_loss = True
             self.disc_warmup_steps = 0
@@ -36,7 +44,6 @@ class BigVGANStrategy:
             self.phase1_disc_start = _cfg_get(cfg, "phase1_disc_start", 90000)
             self.phase1_mel_target = _cfg_get(cfg, "phase1_mel_target", 0.35)
             self.phase2_vocoder_lr = _cfg_get(cfg, "phase2_vocoder_lr", 1e-5)
-            self.grad_clip_norm = _cfg_get(cfg, "grad_clip_norm", None)
             self.use_mel_loss = _cfg_get(cfg, "use_mel_loss", True)
             self.use_bigvgan_mel_loss = _cfg_get(cfg, "use_bigvgan_mel_loss", True)
             # no-GAN warmup：前 N 步彻底关闭所有判别器，只跑 mel+KL+f0+bigvgan_mel，

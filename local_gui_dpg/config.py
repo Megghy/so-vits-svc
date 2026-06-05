@@ -4,8 +4,16 @@ import os
 import re
 import glob
 import json
+import sys
 import yaml
 import soundfile as sf
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from training_config import (
+    BIGVGAN_VOCODERS,
+    NSF_HIFIGAN_VOCODERS,
+    normalize_training_config as _normalize_training_config,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DIR = os.path.join(ROOT, "projects")
@@ -82,6 +90,11 @@ CONFIG_FIELDS = [
      "  需安装 bigvgan>=2.4.1。改动结构，需重新训练。\n"
      "· nsf-bigvgan-v2：在 BigVGAN upsample stage 显式注入 NSF f0 激励源，\n"
      "  适合优先解决歌声谐波/高频稳定性问题。需重新训练。"),
+    ("model.nsf_source_scale", "NSF source注入强度", "float", 0.7, (0.0, 1.0),
+     "仅 nsf-hifigan / nsf-snake-hifigan 生效。\n"
+     "降低 harmonic source 固定注入强度，保留 CQT/MRD 的频谱判别能力，\n"
+     "但限制 f0 激励被对抗训练过度放大。建议先用 0.7；电音仍重可试 0.5~0.6，\n"
+     "高音变软则回到 0.8。"),
     ("model.bigvgan_model", "BigVGAN模型名", "str", "nvidia/bigvgan_v2_44khz_128band_512x", None,
      "BigVGAN 系后端使用的 BigVGAN checkpoint。默认匹配 44.1k / 512x。"),
     ("model.bigvgan_mel_channels", "BigVGAN mel通道", "int", 128, (80, 128),
@@ -94,26 +107,26 @@ CONFIG_FIELDS = [
      "是否训练 BigVGAN 本体。关闭时只训练 latent→mel 投影，显存更省；开启可提升适配但更容易不稳定。"),
     ("model.bigvgan_cuda_kernel", "BigVGAN CUDA kernel", "bool", False, None,
      "启用 BigVGAN fused CUDA kernel。训练期建议先关闭，推理优化时再试。"),
-    # ===== 判别器增强（BigVGAN-v2，仅影响训练，不改推理）=====
+    # ===== 判别器增强（仅影响训练，不改推理）=====
     ("model.use_cqt_disc", "CQT 判别器", "bool", False, None,
-     "MS-SB-CQT 多尺度子带常Q变换判别器(BigVGAN-v2)。\n"
+     "MS-SB-CQT 多尺度子带常Q变换判别器。\n"
      "在对数频率轴上判别，对谐波结构/音准敏感，翻唱画质增益主要来源。\n"
      "新增依赖 nnAudio。建议翻唱优先开启此项。\n"
      "仅训练期生效，推理无任何改动。需重新训练。"),
     ("model.use_mrd_disc", "MRD 判别器", "bool", False, None,
-     "多分辨率 STFT 判别器(BigVGAN-v2)。\n"
+     "多分辨率 STFT 判别器。\n"
      "在多个 n_fft/hop 分辨率下判别频谱细节，补充高频质感。\n"
      "无新增依赖(torch.stft)。可与 CQT 同时开启。\n"
      "仅训练期生效，需重新训练。"),
     ("model.use_mbd_disc", "MBD 判别器", "bool", False, None,
-     "多子带多尺度 STFT 判别器(BigVGAN-v2)。\n"
+     "多子带多尺度 STFT 判别器。\n"
      "将频谱切成多个子带分别判别，进一步细化频谱。\n"
      "训练开销较大，显存紧张时可不开。\n"
      "仅训练期生效，需重新训练。"),
     ("train.disc_start_step", "附加判别器启用step", "int", 10000, (0, 200000),
-     "BigVGAN 两段式专用：前 N 步只用 MPD 判别器，到达该 step 才接入 CQT/MRD/MBD。\n"
-     "给随机初始化的 mel head 一段不被多判别器对抗梯度干扰的对齐窗口，避免早期发散。\n"
-     "0=从头就全开。建议 5000~20000，看 TensorBoard 的 loss/g/bigvgan_mel 压平后再开。\n"
+     "前 N 步只用 MPD 判别器，到达该 step 才接入 CQT/MRD/MBD。\n"
+     "给主模型一段不被多判别器对抗梯度干扰的对齐窗口，避免早期发散。\n"
+     "0=从头就全开。启用 CQT/MRD 时建议 5000~20000。\n"
      "续训按 global_step 自动接续，无需手动切换。\n"
      "注意：启用自动分阶段策略时，Phase1 此项会被策略覆盖。"),
     # ===== BigVGAN 自动分阶段训练策略 =====
@@ -136,10 +149,6 @@ CONFIG_FIELDS = [
      "Phase2 解冻后声码器的固定微调 lr(不跟 cosine 衰减)。\n"
      "1e-5 是微调预训练声码器的安全值，防灾难性遗忘。\n"
      "仅 auto_finetune/finetune_from_start 生效。"),
-    ("train.bigvgan_strategy.grad_clip_norm", "梯度裁剪阈值", "float", 5.0, (0.0, 20.0),
-     "梯度 L2 范数裁剪阈值。0=只测量不裁剪。\n"
-     "推荐 5.0 稳定训练，尤其配合 Lion optimizer。\n"
-     "对所有 mode 生效(包括 frozen)。"),
     ("train.bigvgan_strategy.use_mel_loss", "使用 80-band mel loss", "bool", True, None,
      "是否用 80-band 穿透声码器的 loss_mel。\n"
      "Phase2(解冻)时建议保持开启(端到端监督)。\n"
@@ -167,6 +176,9 @@ CONFIG_FIELDS = [
      "随机将整条特征通道置零并按 1/(1-p) 重缩放(保持期望幅度)。\n"
      "0=关闭。建议 0.05~0.2。\n"
      "需先勾选「特征域增强」。"),
+    ("train.grad_clip_norm", "梯度裁剪阈值", "float", 5.0, (0.0, 20.0),
+     "梯度 L2 范数裁剪阈值。0=只测量不裁剪。\n"
+     "推荐 5.0 稳定训练，尤其配合 Lion 或 CQT/MRD 判别器。"),
     ("model.use_speaker_adversarial", "说话人对抗解耦", "bool", False, None,
      "在内容特征后加 gradient reversal 说话人分类头，降低源歌手音色泄漏。\n"
      "翻唱实验项；开启后配合下方 c_speaker_adv 调权重。改动结构，需重新训练。"),
@@ -226,18 +238,18 @@ CONFIG_GROUPS = [
                   "train.all_in_mem", "train.num_workers"], True),
     ("模型与编码器", ["data.sampling_rate", "model.speech_encoder", "model.whisper_path",
                     "model.vocoder_name", "model.bigvgan_model", "model.bigvgan_mel_channels",
-                    "train.c_bigvgan_mel", "model.bigvgan_trainable", "model.bigvgan_cuda_kernel"], True),
+                    "train.c_bigvgan_mel", "model.bigvgan_trainable", "model.bigvgan_cuda_kernel",
+                    "model.nsf_source_scale"], True),
     ("BigVGAN 自动分阶段训练策略 (推荐)", [
         "train.bigvgan_strategy.mode",
         "train.bigvgan_strategy.phase1_disc_start",
         "train.bigvgan_strategy.phase1_mel_target",
         "train.bigvgan_strategy.phase2_vocoder_lr",
-        "train.bigvgan_strategy.grad_clip_norm",
         "train.bigvgan_strategy.use_mel_loss",
         "train.bigvgan_strategy.use_bigvgan_mel_loss"
     ], True),
-    ("判别器增强 (BigVGAN-v2，仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
-                                          "model.use_mbd_disc", "train.disc_start_step"], True),
+    ("判别器增强 (仅训练期)", ["model.use_cqt_disc", "model.use_mrd_disc",
+                              "model.use_mbd_disc", "train.disc_start_step"], True),
     ("数据增强", ["train.vol_aug", "train.feature_aug", "train.feature_aug_noise",
                   "train.feature_aug_time_mask", "train.feature_aug_channel_dropout"], True),
     ("高级模型结构 (不常用，改后需重训)", ["model.use_speaker_adversarial", "model.speaker_adversarial_weight",
@@ -245,6 +257,7 @@ CONFIG_GROUPS = [
                                           "model.n_layers_trans_flow", "model.use_depthwise_conv",
                                           "model.use_automatic_f0_prediction"], False),
     ("高级训练超参 (不常用)", ["train.optimizer", "train.weight_decay", "train.warmup_epochs",
+                              "train.grad_clip_norm",
                               "train.lr_decay_steps", "train.c_mel", "train.c_kl", "train.c_speaker_adv",
                               "train.seed"], False),
 ]
@@ -254,11 +267,14 @@ CONFIG_FIELD_MAP = {f[0]: f for f in CONFIG_FIELDS}
 
 # 字段动态显隐：path -> 谓词(get)，get(path) 返回另一字段的当前值。
 # 不在表中的字段恒显示。核心目的：某模块未选中时，其专属设置整体隐藏，避免迷惑。
-BIGVGAN_VOCODERS = ("bigvgan", "bigvgan-v2", "nsf-bigvgan-v2")
 
 
 def _is_bigvgan(get):
     return get("model.vocoder_name") in BIGVGAN_VOCODERS
+
+
+def _is_nsf_hifigan(get):
+    return get("model.vocoder_name") in NSF_HIFIGAN_VOCODERS
 
 
 FIELD_VISIBILITY = {
@@ -270,12 +286,8 @@ FIELD_VISIBILITY = {
     "train.c_bigvgan_mel": _is_bigvgan,
     "model.bigvgan_trainable": _is_bigvgan,
     "model.bigvgan_cuda_kernel": _is_bigvgan,
-    "model.use_cqt_disc": _is_bigvgan,
-    "model.use_mrd_disc": _is_bigvgan,
-    "model.use_mbd_disc": _is_bigvgan,
-    "train.disc_start_step": _is_bigvgan,
+    "model.nsf_source_scale": _is_nsf_hifigan,
     "train.bigvgan_strategy.mode": _is_bigvgan,
-    "train.bigvgan_strategy.grad_clip_norm": _is_bigvgan,
     "train.bigvgan_strategy.use_mel_loss": _is_bigvgan,
     "train.bigvgan_strategy.use_bigvgan_mel_loss": _is_bigvgan,
     # BigVGAN 策略 mode 子项(需 BigVGAN 声码器 + 对应 mode)
@@ -325,6 +337,11 @@ def normalize_encoder_dims(cfg):
     dim = ENCODER_DIM.get(m.get("speech_encoder"))
     if dim is not None:
         m["ssl_dim"] = dim
+
+
+def normalize_training_config(cfg):
+    # GUI 编辑场景：补齐 grad_clip_norm 与 BigVGAN 策略默认值，让面板有可编辑初值。
+    return _normalize_training_config(cfg, fill_defaults=True)
 
 
 def check_config(cfg):
@@ -450,35 +467,34 @@ def create_project(name):
 def load_config(name):
     with open(config_path(name), encoding="utf-8") as f:
         cfg = json.load(f)
-    # 兼容旧配置:若没有 bigvgan_strategy 则注入默认值
-    if "bigvgan_strategy" not in cfg.get("train", {}):
-        cfg.setdefault("train", {})["bigvgan_strategy"] = {
-            "mode": "frozen",
-            "phase1_disc_start": 90000,
-            "phase1_mel_target": 0.35,
-            "phase2_vocoder_lr": 1e-5,
-            "grad_clip_norm": 5.0,
-            "use_mel_loss": True,
-            "use_bigvgan_mel_loss": True
-        }
-    return cfg
+    return normalize_training_config(cfg)
 
 
 def save_config(name, values):
     """values: {json_path: new_value}"""
-    cfg = load_config(name)
+    with open(config_path(name), encoding="utf-8") as f:
+        cfg = json.load(f)
+    original = json.dumps(cfg, ensure_ascii=False, sort_keys=True)
+    normalize_training_config(cfg)
     changed = []
     for path, val in values.items():
         keys = path.split(".")
         node = cfg
         for k in keys[:-1]:
-            node = node[k]
+            child = node.get(k)
+            if not isinstance(child, dict):
+                child = {}
+                node[k] = child
+            node = child
         old = node.get(keys[-1])
         if old != val:
             node[keys[-1]] = val
             changed.append(f"{path} = {val}")
+    normalize_encoder_dims(cfg)
+    normalize_training_config(cfg)
+    if json.dumps(cfg, ensure_ascii=False, sort_keys=True) != original and not changed:
+        changed.append("配置已归一化")
     if changed:
-        normalize_encoder_dims(cfg)
         with open(config_path(name), "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     return changed

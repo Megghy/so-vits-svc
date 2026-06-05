@@ -87,6 +87,37 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         finally:
             sys.modules.pop("bigvgan", None)
 
+    def test_nsf_hifigan_source_scale_is_config_only_and_checkpoint_compatible(self):
+        from models import SynthesizerTrn
+
+        for vocoder_name in ("nsf-hifigan", "nsf-snake-hifigan"):
+            with self.subTest(vocoder_name=vocoder_name):
+                model = SynthesizerTrn(
+                    spec_channels=5,
+                    segment_size=4,
+                    inter_channels=4,
+                    hidden_channels=4,
+                    filter_channels=8,
+                    n_heads=1,
+                    n_layers=1,
+                    kernel_size=3,
+                    p_dropout=0.0,
+                    resblock="1",
+                    resblock_kernel_sizes=[3],
+                    resblock_dilation_sizes=[[1, 3, 5]],
+                    upsample_rates=[2, 2],
+                    upsample_initial_channel=8,
+                    upsample_kernel_sizes=[4, 4],
+                    gin_channels=4,
+                    ssl_dim=768,
+                    n_speakers=2,
+                    vocoder_name=vocoder_name,
+                    nsf_source_scale=0.7,
+                )
+
+                self.assertEqual(0.7, model.dec.source_scale)
+                self.assertFalse(any("source_scale" in key for key in model.dec.state_dict()))
+
     def test_bigvgan_decoder_uses_mel_projection_and_keeps_decoder_call_contract(self):
         fake_module = types.SimpleNamespace(BigVGAN=FakeBigVGAN)
         sys.modules["bigvgan"] = fake_module
@@ -149,6 +180,7 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         self.assertEqual(768, config.ENCODER_DIM["vec768l12mix"])
         self.assertIn("model.vocoder_name", field_paths)
         self.assertIn("model.bigvgan_model", field_paths)
+        self.assertIn("model.nsf_source_scale", field_paths)
         self.assertIn("model.use_speaker_adversarial", field_paths)
         self.assertIn("train.c_speaker_adv", field_paths)
 
@@ -172,7 +204,8 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         from modules.bigvgan_strategy import BigVGANStrategy
         from utils import HParams
 
-        strategy = BigVGANStrategy(HParams(train=HParams()), model_dir=".")
+        hps = HParams(train=HParams(), model=HParams(vocoder_name="bigvgan-v2"))
+        strategy = BigVGANStrategy(hps, model_dir=".")
         calls = []
 
         class FakeDistributed:
@@ -203,13 +236,13 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         from utils import HParams
 
         hps = HParams(
+            model=HParams(vocoder_name="bigvgan-v2"),
             train=HParams(
                 bigvgan_strategy=HParams(
                     mode="auto_finetune",
                     phase1_disc_start=12345,
                     phase1_mel_target=0.42,
                     phase2_vocoder_lr=2e-5,
-                    grad_clip_norm=4.0,
                     use_mel_loss=False,
                     use_bigvgan_mel_loss=True,
                 )
@@ -222,9 +255,44 @@ class ExperimentalUpgradeTests(unittest.TestCase):
         self.assertEqual(12345, strategy.phase1_disc_start)
         self.assertEqual(0.42, strategy.phase1_mel_target)
         self.assertEqual(2e-5, strategy.phase2_vocoder_lr)
-        self.assertEqual(4.0, strategy.grad_clip_norm)
         self.assertFalse(strategy.use_mel_loss)
         self.assertTrue(strategy.use_bigvgan_mel_loss)
+
+    def test_bigvgan_strategy_rejects_nsf_hifigan(self):
+        from modules.bigvgan_strategy import BigVGANStrategy
+        from utils import HParams
+
+        hps = HParams(train=HParams(), model=HParams(vocoder_name="nsf-hifigan"))
+
+        with self.assertRaises(ValueError):
+            BigVGANStrategy(hps, model_dir=".")
+
+    def test_training_config_ignores_bigvgan_strategy_for_nsf_but_keeps_extra_discriminators(self):
+        from utils import normalize_training_config
+
+        cfg = {
+            "train": {
+                "disc_start_step": 20000,
+                "bigvgan_strategy": {
+                    "mode": "auto_finetune",
+                    "phase1_disc_start": 30000,
+                    "grad_clip_norm": 5.0,
+                },
+            },
+            "model": {
+                "vocoder_name": "nsf-hifigan",
+                "use_cqt_disc": True,
+                "use_mrd_disc": True,
+            },
+        }
+
+        normalize_training_config(cfg)
+
+        self.assertNotIn("bigvgan_strategy", cfg["train"])
+        self.assertEqual(5.0, cfg["train"]["grad_clip_norm"])
+        self.assertEqual(20000, cfg["train"]["disc_start_step"])
+        self.assertTrue(cfg["model"]["use_cqt_disc"])
+        self.assertTrue(cfg["model"]["use_mrd_disc"])
 
 
 if __name__ == "__main__":

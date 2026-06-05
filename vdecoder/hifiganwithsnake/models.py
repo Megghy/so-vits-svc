@@ -12,6 +12,7 @@ from vdecoder.hifiganwithsnake.alias.act import SnakeAlias
 
 from .env import AttrDict
 from .utils import get_padding, init_weights
+from vdecoder.nsf_source import add_injection_stats, build_source_stats, get_source_scale
 
 LRELU_SLOPE = 0.1
 
@@ -345,6 +346,8 @@ class Generator(torch.nn.Module):
         self.m_source = SourceModuleHnNSF(
             sampling_rate=h["sampling_rate"],
             harmonic_num=8)
+        self.source_scale = get_source_scale(h)
+        self.source_stats = {}
         self.noise_convs = nn.ModuleList()
         self.conv_pre = weight_norm(Conv1d(h["inter_channels"], h["upsample_initial_channel"], 7, 1, padding=3))
         resblock = ResBlock1 if h["resblock"] == '1' else ResBlock2
@@ -387,6 +390,7 @@ class Generator(torch.nn.Module):
         # print(2,f0.shape)
         har_source, noi_source, uv = self.m_source(f0, self.upp)
         har_source = har_source.transpose(1, 2)
+        source_stats = build_source_stats(har_source, uv, self.source_scale) if self.training else None
         x = self.conv_pre(x)
         x = x + self.cond(g)
         # print(124,x.shape,har_source.shape)
@@ -395,7 +399,10 @@ class Generator(torch.nn.Module):
             x = self.snakes[i](x)
             # print(f"self.snakes.{i}.after:", x.shape)
             x = self.ups[i](x)
-            x_source = self.noise_convs[i](har_source)
+            x_source = self.noise_convs[i](har_source) * self.source_scale
+            if source_stats is not None:
+                with torch.no_grad():
+                    add_injection_stats(source_stats, i, x_source, x)
             # print(4,x_source.shape,har_source.shape,x.shape)
             x = x + x_source
             xs = None
@@ -409,6 +416,8 @@ class Generator(torch.nn.Module):
         x = self.snake_post(x)
         x = self.conv_post(x)
         x = torch.tanh(x)
+        if source_stats is not None:
+            self.source_stats = source_stats
 
         return x
 

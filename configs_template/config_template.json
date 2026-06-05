@@ -35,7 +35,8 @@
     "feature_aug": false,
     "feature_aug_noise": 0.0,
     "feature_aug_time_mask": 0,
-    "feature_aug_channel_dropout": 0.0
+    "feature_aug_channel_dropout": 0.0,
+    "grad_clip_norm": 5.0
   },
   "data": {
     "training_files": "filelists/train.txt",
@@ -75,6 +76,7 @@
     "bigvgan_mel_channels":128,
     "bigvgan_trainable":false,
     "bigvgan_cuda_kernel":false,
+    "nsf_source_scale":0.7,
     "speech_encoder":"vec768l12",
     "whisper_path":"pretrain/large-v3.pt",
     "vol_embedding":false,

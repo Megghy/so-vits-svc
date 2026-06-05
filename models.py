@@ -512,7 +512,8 @@ class SynthesizerTrn(nn.Module):
             "upsample_initial_channel": upsample_initial_channel,
             "upsample_kernel_sizes": upsample_kernel_sizes,
             "gin_channels": gin_channels,
-            "use_depthwise_conv":use_depthwise_conv
+            "use_depthwise_conv": use_depthwise_conv,
+            "nsf_source_scale": kwargs.get("nsf_source_scale", 1.0),
         }
         
         modules.set_Conv1dModel(self.use_depthwise_conv)
